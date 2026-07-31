@@ -1,0 +1,1255 @@
+<script>
+"use strict";
+
+// ============================================================
+// Pagination + rendering
+// ============================================================
+let paragraphSentences = []; // [{id, text}, ...] per paragraph, stable across pages
+let currentPage = 0;
+let totalPages = 1;
+const cache = new Map(); // cacheKey -> {grammarHtml, vocabHtml} or {error}
+let activeSpan = null;
+
+// Cache keys are content-based (chapter id + sentence text), not the plain
+// numeric sid, because sid is just a per-render counter that gets reassigned
+// every time chapters/text changes — using it directly would silently
+// invalidate (or worse, cross-wire) the persisted cache after any switch.
+function cacheKeyFor(sentenceText) {
+  const chId = currentChapter().id || 'custom';
+  let hash = 0;
+  for (let i = 0; i < sentenceText.length; i++) {
+    hash = ((hash << 5) - hash + sentenceText.charCodeAt(i)) | 0;
+  }
+  return chId + ':' + hash;
+}
+
+// Cache is namespaced per document as well as per chapter, so switching
+// documents never touches another document's cached analyses.
+function cacheStorageKey() {
+  return CACHE_STORAGE_PREFIX + currentDocId + ':' + (currentChapter().id || 'custom');
+}
+
+// Blob storage is async (see initBlobStore), so warming can't be done inline
+// during rebuildParagraphSentences() any more. The cache only affects what
+// happens when a sentence is *clicked*, so rendering does not have to wait for
+// it -- but a click landing in that window would re-analyse a sentence that
+// was already paid for, so onSentenceClick() awaits this promise before
+// looking in the cache.
+let cacheWarmPromise = Promise.resolve();
+
+function warmCacheFromStorage() {
+  cache.clear();
+  const key = cacheStorageKey(); // captured now: the chapter may change meanwhile
+  cacheWarmPromise = blobGet(key).then(raw => {
+    // A switch that happened while this was in flight already cleared the map
+    // and started its own warm; don't pour a stale chapter's entries into it.
+    if (key !== cacheStorageKey()) return;
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw);
+      Object.keys(parsed).forEach(k => cache.set(k, parsed[k]));
+    } catch (e) { /* ignore corrupt cache */ }
+  }).catch(() => {});
+  return cacheWarmPromise;
+}
+
+// The storage key and a snapshot of the cache are captured immediately (not
+// inside the timeout callback) so that switching documents/chapters within
+// the debounce window can't cause the write to land under the WRONG key --
+// or get silently cancelled by clearTimeout() when the next switch calls
+// this again for a different document.
+let persistCacheTimer = null;
+let pendingCacheWrite = null; // { key, obj }
+
+function flushPendingCacheWrite() {
+  if (!pendingCacheWrite) return;
+  clearTimeout(persistCacheTimer);
+  persistCacheTimer = null;
+  const { key, obj } = pendingCacheWrite;
+  pendingCacheWrite = null;
+  return blobSet(key, JSON.stringify(obj)).catch(err => {
+    // Losing a cached analysis is not fatal -- it will be re-fetched -- but it
+    // costs the reader an API call, so say so rather than failing silently.
+    reportStorageError(err);
+  });
+}
+
+function persistCacheDebounced() {
+  const obj = {};
+  cache.forEach((v, k) => { obj[k] = v; });
+  pendingCacheWrite = { key: cacheStorageKey(), obj };
+  clearTimeout(persistCacheTimer);
+  persistCacheTimer = setTimeout(flushPendingCacheWrite, 400);
+}
+
+// Drops every persisted analysis of one document (all of its chapters). When
+// that document is the one on screen its in-memory copy has to go too -- and
+// any debounced write still in flight, which would otherwise re-persist the
+// entries we just deleted a few hundred milliseconds later.
+async function clearDocumentCache(docId) {
+  if (docId === currentDocId) {
+    cache.clear();
+    clearTimeout(persistCacheTimer);
+    persistCacheTimer = null;
+    pendingCacheWrite = null;
+  }
+  try {
+    const prefix = CACHE_STORAGE_PREFIX + docId + ':';
+    const keys = await blobKeys(prefix);
+    for (const k of keys) await blobRemove(k);
+  } catch (e) { /* ignore */ }
+}
+
+function clearCurrentDocumentCache() {
+  return clearDocumentCache(currentDocId);
+}
+
+// Segments, not sentences: one sentence can occupy several non-adjacent
+// stretches of a paragraph when a footnote interrupts it (see
+// splitIntoSentenceUnits). Every segment carries the id of the sentence it
+// belongs to, so several segments can share one id.
+let flatSentences = []; // [{ pIdx, id, text }, ...] across the chapter, in reading order
+let sentenceTexts = new Map(); // sentence id -> the text actually sent for analysis
+
+function rebuildParagraphSentences() {
+  flushPendingCacheWrite(); // never let a chapter/document switch drop a pending write
+  let sentCounter = 0;
+  sentenceTexts = new Map();
+  paragraphSentences = PARAGRAPHS.map((paraText) => {
+    const { units, segments } = splitIntoSentenceUnits(paraText, settings.sentenceLang);
+    // unit ids are per-paragraph; map them onto ids unique across the chapter
+    const globalId = new Map();
+    units.forEach((u) => {
+      const id = sentCounter++;
+      globalId.set(u.uid, id);
+      sentenceTexts.set(id, u.text);
+    });
+    return segments.map((s) => ({ id: globalId.get(s.uid), text: s.text }));
+  });
+  flatSentences = [];
+  paragraphSentences.forEach((segs, pIdx) => {
+    segs.forEach(({ id, text }) => flatSentences.push({ pIdx, id, text }));
+  });
+  warmCacheFromStorage();
+  recomputeTotalPages();
+}
+
+function spansForSentence(id) {
+  return document.querySelectorAll(`.sent[data-sid="${id}"]`);
+}
+
+function buildParagraphElement(pIdx) {
+  const p = document.createElement('p');
+  p.className = 'para';
+  const seen = new Set();
+  (paragraphSentences[pIdx] || []).forEach(({ id, text }) => {
+    appendSentenceSpan(p, pIdx, id, text, !seen.has(id));
+    seen.add(id);
+  });
+  return p;
+}
+
+// `isFirst` marks a sentence's first segment. Only that one is a focus stop:
+// making every segment tabbable would force a keyboard user to tab through the
+// same sentence twice just because a footnote splits it.
+function appendSentenceSpan(pEl, pIdx, id, text, isFirst) {
+  // Segments carry their own surrounding whitespace so that they tile the
+  // paragraph exactly. A whitespace-only segment becomes a plain text node --
+  // it would otherwise be an invisible clickable sliver between two sentences.
+  if (!text.trim()) {
+    pEl.appendChild(document.createTextNode(text));
+    return;
+  }
+  const span = document.createElement('span');
+  span.className = 'sent';
+  span.dataset.sid = String(id);
+  span.dataset.paraIdx = String(pIdx);
+  span.textContent = text;
+  // Tell assistive tech which language this is. On a foreign-language reading
+  // tool this is the single highest-value accessibility attribute there is:
+  // without it a screen reader pronounces German text with the UI language's
+  // phonetics.
+  span.lang = settings.sentenceLang || 'de';
+  if (isFirst) {
+    span.setAttribute('role', 'button');
+    span.tabIndex = 0;
+    span.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      onSentenceClick(span, sentenceTexts.get(id) || text);
+    });
+  }
+  span.addEventListener('click', () => onSentenceClick(span, sentenceTexts.get(id) || text));
+  // A sentence split by a footnote is several elements, so :hover on one of
+  // them cannot light up the rest -- drive the highlight from JS instead.
+  span.addEventListener('mouseenter', () => {
+    spansForSentence(id).forEach((el) => el.classList.add('hover'));
+  });
+  span.addEventListener('mouseleave', () => {
+    spansForSentence(id).forEach((el) => el.classList.remove('hover'));
+  });
+  pEl.appendChild(span);
+}
+
+function renderAllParagraphsInto(el) {
+  el.innerHTML = '';
+  let pEl = null;
+  let currentPIdx = -1;
+  const seen = new Set();
+  flatSentences.forEach((item) => {
+    if (item.pIdx !== currentPIdx) {
+      pEl = document.createElement('p');
+      pEl.className = 'para';
+      el.appendChild(pEl);
+      currentPIdx = item.pIdx;
+    }
+    appendSentenceSpan(pEl, item.pIdx, item.id, item.text, !seen.has(item.id));
+    seen.add(item.id);
+  });
+}
+
+// ============================================================
+// "Fit one screen per page" pagination, via real CSS multi-column layout
+// instead of a hand-rolled height-measuring loop. The whole chapter is laid
+// out ONCE as continuous columns exactly one viewport-width wide; "paging"
+// is just translateX-ing that column strip by one column per page, the same
+// technique epub readers use. This intentionally allows a sentence to be
+// visually cut across a page boundary (its <span> is one element; the
+// column layout can end mid-element and continue it at the top of the next
+// column) -- trying to keep whole sentences on one page inevitably fights
+// with real device/window heights and real sentence lengths and produces
+// either overflow or wasted blank space; letting the browser's own text
+// engine do the breaking, exactly like it breaks lines, sidesteps that
+// entirely and can never overflow by construction.
+// ============================================================
+let columnPageWidth = 0;
+
+function outerHeight(el) {
+  if (!el) return 0;
+  const cs = getComputedStyle(el);
+  return el.offsetHeight + parseFloat(cs.marginTop || 0) + parseFloat(cs.marginBottom || 0);
+}
+
+// Sizes #text-container (the fixed-size clipping viewport) and #text-columns
+// (the actual column-laid-out content, wider than the viewport and shifted
+// via transform) to match the space actually available below the toolbar/
+// book-header/divider and above the bottom pager.
+function computeColumnLayout() {
+  const wrap = document.querySelector('.reader-wrap');
+  const readerInner = document.querySelector('.reader-inner');
+  const textContainer = document.getElementById('text-container');
+  const columns = document.getElementById('text-columns');
+  if (!wrap || !readerInner || !textContainer || !columns) return;
+
+  const toolbar = document.querySelector('.toolbar');
+  const header = document.querySelector('.book-header');
+  const divider = document.querySelector('.divider');
+  const used = outerHeight(toolbar) + outerHeight(header) + outerHeight(divider);
+  const innerCs = getComputedStyle(readerInner);
+  const vPad = parseFloat(innerCs.paddingTop || 0) + parseFloat(innerCs.paddingBottom || 0);
+  const availableHeight = Math.max(200, wrap.clientHeight - used - vPad - 20);
+
+  const innerRect = readerInner.getBoundingClientRect();
+  const contentWidth = Math.max(
+    100,
+    innerRect.width - parseFloat(innerCs.paddingLeft || 0) - parseFloat(innerCs.paddingRight || 0)
+  );
+
+  columnPageWidth = contentWidth;
+
+  textContainer.style.width = contentWidth + 'px';
+  textContainer.style.height = availableHeight + 'px';
+  textContainer.style.overflow = 'hidden';
+
+  columns.style.columnWidth = contentWidth + 'px';
+  columns.style.columnGap = '0px';
+  columns.style.columnFill = 'auto';
+  columns.style.height = availableHeight + 'px';
+  columns.style.width = 'auto';
+  columns.style.transition = 'none'; // set only while the user is actively paging, see goToPage()
+}
+
+// Undoes computeColumnLayout()'s inline sizing for the non-fit-height modes,
+// letting #text-container/#text-columns fall back to normal block flow
+// (reader-wrap itself scrolls when content overflows, as before).
+function resetColumnLayout() {
+  const textContainer = document.getElementById('text-container');
+  const columns = document.getElementById('text-columns');
+  if (textContainer) {
+    textContainer.style.width = '';
+    textContainer.style.height = '';
+    textContainer.style.overflow = '';
+  }
+  if (columns) {
+    columns.style.columnWidth = '';
+    columns.style.columnGap = '';
+    columns.style.columnFill = '';
+    columns.style.height = '';
+    columns.style.width = '';
+    columns.style.transform = '';
+    columns.style.transition = '';
+  }
+}
+
+function recomputeTotalPages() {
+  const columns = document.getElementById('text-columns');
+  if (settings.paginationMode === 'none') {
+    resetColumnLayout();
+    totalPages = 1;
+  } else if (settings.paginationMode === 'fit-height') {
+    renderAllParagraphsInto(columns);
+    computeColumnLayout();
+    totalPages = columnPageWidth ? Math.max(1, Math.round(columns.scrollWidth / columnPageWidth)) : 1;
+  } else {
+    resetColumnLayout();
+    const perPage = Math.max(1, settings.parasPerPage || 8);
+    totalPages = Math.max(1, Math.ceil(PARAGRAPHS.length / perPage));
+  }
+}
+
+function renderPage(pageIndex) {
+  currentPage = Math.max(0, Math.min(totalPages - 1, pageIndex));
+  const columns = document.getElementById('text-columns');
+
+  if (!PARAGRAPHS.length) {
+    resetColumnLayout();
+    columns.innerHTML = `
+      <div class="empty-state">
+        ${t('emptyState.text')}
+        <br><button id="empty-open-settings">${t('emptyState.openSettings')}</button>
+      </div>`;
+    document.getElementById('empty-open-settings').addEventListener('click', openSettings);
+    updatePagerUI();
+    return;
+  }
+
+  if (settings.paginationMode === 'fit-height') {
+    // content is already fully laid out by recomputeTotalPages(); paging is
+    // just shifting the column strip
+    columns.style.transform = `translateX(${-currentPage * columnPageWidth}px)`;
+  } else {
+    resetColumnLayout();
+    columns.innerHTML = '';
+    let start = 0, end = PARAGRAPHS.length;
+    if (settings.paginationMode !== 'none') {
+      const perPage = Math.max(1, settings.parasPerPage || 8);
+      start = currentPage * perPage;
+      end = Math.min(PARAGRAPHS.length, start + perPage);
+    }
+    for (let pIdx = start; pIdx < end; pIdx++) {
+      columns.appendChild(buildParagraphElement(pIdx));
+    }
+  }
+
+  updatePagerUI();
+  saveProgress();
+  const wrap = document.querySelector('.reader-wrap');
+  if (wrap && typeof wrap.scrollTo === 'function') {
+    wrap.scrollTo({ top: 0, behavior: 'auto' });
+  } else if (wrap) {
+    wrap.scrollTop = 0;
+  }
+}
+
+let resizeRerenderTimer = null;
+function wireResizeRerender() {
+  window.addEventListener('resize', () => {
+    if (settings.paginationMode !== 'fit-height') return;
+    clearTimeout(resizeRerenderTimer);
+    resizeRerenderTimer = setTimeout(() => {
+      recomputeTotalPages();
+      renderPage(Math.min(currentPage, totalPages - 1));
+    }, 250);
+  });
+}
+
+function updatePagerUI() {
+  const showPager = settings.paginationMode !== 'none' && PARAGRAPHS.length > 0;
+  document.querySelectorAll('.pager-page-input').forEach(el => {
+    el.max = String(totalPages);
+    if (document.activeElement !== el) el.value = String(currentPage + 1);
+  });
+  document.querySelectorAll('.pager-total').forEach(el => {
+    el.textContent = String(totalPages);
+  });
+  document.querySelectorAll('.pager-prev, .pager-next').forEach(el => {
+    el.style.display = showPager ? '' : 'none';
+  });
+  document.querySelectorAll('.pager-status').forEach(el => {
+    el.style.display = showPager ? '' : 'none';
+  });
+  const bottomPager = document.getElementById('bottom-pager-wrap');
+  if (bottomPager) bottomPager.style.display = showPager ? 'flex' : 'none';
+  document.querySelectorAll('.pager-prev').forEach(el => { el.disabled = currentPage <= 0; });
+  document.querySelectorAll('.pager-next').forEach(el => { el.disabled = currentPage >= totalPages - 1; });
+}
+
+function goToPage(idx) {
+  if (idx === currentPage) return;
+  if (settings.paginationMode === 'fit-height') {
+    const columns = document.getElementById('text-columns');
+    if (columns) columns.style.transition = 'transform .2s ease';
+  }
+  renderPage(idx);
+}
+
+async function saveProgress() {
+  const key = progressKeyForCurrentText();
+  const payload = JSON.stringify({ page: currentPage, updatedAt: Date.now() });
+  try {
+    if (window.storage && window.storage.set) {
+      await window.storage.set(key, payload);
+    }
+  } catch (e) { /* artifact storage may be unavailable outside claude.ai */ }
+  try {
+    localStorage.setItem(key, payload);
+  } catch (e) { /* ignore */ }
+}
+
+async function loadProgress() {
+  const key = progressKeyForCurrentText();
+  try {
+    if (window.storage && window.storage.get) {
+      const result = await window.storage.get(key);
+      if (result && result.value) {
+        const parsed = JSON.parse(result.value);
+        if (typeof parsed.page === 'number') return parsed.page;
+      }
+    }
+  } catch (e) { /* fall through to localStorage */ }
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed.page === 'number') return parsed.page;
+    }
+  } catch (e) { /* ignore */ }
+  return 0;
+}
+
+function wirePagerControls() {
+  document.querySelectorAll('.pager-prev').forEach(btn => {
+    btn.addEventListener('click', () => goToPage(currentPage - 1));
+  });
+  document.querySelectorAll('.pager-next').forEach(btn => {
+    btn.addEventListener('click', () => goToPage(currentPage + 1));
+  });
+  document.querySelectorAll('.pager-page-input').forEach(input => {
+    const commit = () => {
+      const n = parseInt(input.value, 10);
+      if (Number.isFinite(n)) {
+        goToPage(Math.max(0, Math.min(totalPages - 1, n - 1)));
+      } else {
+        input.value = String(currentPage + 1);
+      }
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { commit(); input.blur(); }
+      else if (e.key === 'Escape') { input.value = String(currentPage + 1); input.blur(); }
+      e.stopPropagation(); // don't let the global ←/→ page shortcuts fire while typing
+    });
+    input.addEventListener('blur', commit);
+    input.addEventListener('click', (e) => e.stopPropagation());
+  });
+}
+
+// ============================================================
+// Chapters: switching, table of contents, chapter <select>
+// ============================================================
+function switchChapter(index) {
+  if (index === currentChapterIndex || !chapters[index]) return;
+  currentChapterIndex = index;
+  syncFromCurrentChapter();
+  syncTitleFieldsFromState();
+  saveTextToLocalStorage();
+  saveCurrentChapterIndex();
+  rebuildParagraphSentences();
+  renderPage(0);
+  renderTocList();
+  populateChapterSelect();
+  hideToc();
+}
+
+function syncTitleFieldsFromState() {
+  const bookEl = document.getElementById('book-title-field');
+  const chapterEl = document.getElementById('chapter-title-field');
+  const datesEl = document.getElementById('chapter-dates-field');
+  const addBtn = document.getElementById('btn-add-dates');
+  if (bookEl) bookEl.value = bookTitle;
+  if (chapterEl) chapterEl.value = chapterTitle;
+  if (datesEl) datesEl.value = chapterDates;
+  // Not every book/chapter has a subtitle or date range (e.g. a Vorwort) --
+  // showing an empty box with a placeholder for it every time reads oddly,
+  // so it's hidden until there's content, with a small affordance to add one.
+  const hasDates = !!chapterDates;
+  if (datesEl) datesEl.classList.toggle('hidden', !hasDates);
+  if (addBtn) addBtn.classList.toggle('hidden', hasDates);
+}
+
+function populateChapterSelect() {
+  const sel = document.getElementById('chapter-select');
+  if (!sel) return;
+  sel.innerHTML = '';
+  chapters.forEach((ch, i) => {
+    const opt = document.createElement('option');
+    opt.value = String(i);
+    opt.textContent = (ch.title || t('book.chapterFallback', { n: i + 1 })) + (ch.dateRange ? ` · ${ch.dateRange}` : '');
+    sel.appendChild(opt);
+  });
+  sel.value = String(currentChapterIndex);
+}
+
+function renderTocList() {
+  const list = document.getElementById('toc-list');
+  if (!list) return;
+  list.innerHTML = '';
+  chapters.forEach((ch, i) => {
+    const li = document.createElement('li');
+    li.className = 'toc-item' + (i === currentChapterIndex ? ' current' : '');
+    li.innerHTML = `<span class="toc-title">${escapeHtml(ch.title || t('book.chapterFallback', { n: i + 1 }))}</span><span class="toc-dates">${escapeHtml(ch.dateRange || '')}</span>`;
+    li.addEventListener('click', () => switchChapter(i));
+    list.appendChild(li);
+  });
+}
+
+// ============================================================
+// Document library (settings > 文档 tab)
+// ============================================================
+function renderDocLibraryList() {
+  const list = document.getElementById('doc-library-list');
+  if (!list) return;
+  list.innerHTML = '';
+  const index = loadDocIndex();
+  // The example is a build constant rather than a stored document, so its row
+  // is synthesised here -- unless the reader deleted it, in which case it is
+  // gone from the list until the "restore example" button below brings it back.
+  const builtinEntry = isExampleRemoved()
+    ? []
+    : [{ id: BOOK_DOC_ID, title: BOOK_TITLE, chapterCount: BOOK_CHAPTERS.length, builtin: true }];
+  const entries = builtinEntry
+    .concat(index.filter(d => d.id !== BOOK_DOC_ID))
+    .sort((a, b) => (a.builtin ? -1 : b.builtin ? 1 : (b.savedAt || 0) - (a.savedAt || 0)));
+
+  entries.forEach(entry => {
+    const li = document.createElement('li');
+    li.className = 'doc-library-item' + (entry.id === currentDocId ? ' current' : '');
+    const meta = entry.builtin
+      ? t('settings.libraryBuiltin')
+      : t('settings.libraryChapterCount', { n: entry.chapterCount || 0 });
+    li.innerHTML = `
+      <div class="doc-library-item-main">
+        <div class="doc-library-item-title">${escapeHtml(entry.title || t('settings.libraryUntitled'))}</div>
+        <div class="doc-library-item-meta">${meta}<span class="doc-library-item-size"></span></div>
+      </div>
+      <button class="doc-library-item-cache" title="${escapeHtml(t('settings.libraryClearCache'))}"
+              aria-label="${escapeHtml(t('settings.libraryClearCache'))}">⟳</button>
+      <button class="doc-library-item-delete" title="${escapeHtml(t('settings.libraryDelete'))}"
+              aria-label="${escapeHtml(t('settings.libraryDelete'))}">✕</button>
+    `;
+    li.querySelector('.doc-library-item-main').addEventListener('click', async () => {
+      await switchToDocument(entry.id);
+      syncSettingsFormFromState();
+    });
+    li.querySelector('.doc-library-item-cache').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await clearDocumentCache(entry.id);
+      setImportStatus(t('cache.clearedDoc', { title: entry.title || t('settings.libraryUntitled') }), 'success');
+      renderStorageUsage();
+    });
+    li.querySelector('.doc-library-item-delete').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await deleteDocumentFromLibrary(entry.id);
+      syncSettingsFormFromState();
+    });
+    list.appendChild(li);
+    // The built-in book is part of the build, not stored text -- it costs
+    // nothing until it has been edited, so don't put a size on its row.
+    if (!entry.builtin) annotateDocSize(li, entry.id);
+  });
+
+  const restoreBtn = document.getElementById('btn-restore-example');
+  if (restoreBtn) restoreBtn.classList.toggle('hidden', !isExampleRemoved());
+  renderStorageUsage();
+}
+
+// Sizes come from async storage, so they arrive after the row is on screen.
+function annotateDocSize(li, id) {
+  documentStoredSize(id).then(bytes => {
+    if (!bytes || !li.isConnected) return;
+    const el = li.querySelector('.doc-library-item-size');
+    if (el) el.textContent = ' · ' + formatBytes(bytes);
+  }).catch(() => {});
+}
+
+// How much room the library is taking, and where it is being kept. The point
+// is that localStorage gives no way to ask this, so a reader who filled it had
+// no way to find out short of the import failing.
+function renderStorageUsage() {
+  const el = document.getElementById('storage-usage');
+  if (!el) return;
+  blobUsage().then(({ backend, bytes, limit }) => {
+    el.textContent = limit
+      ? t('storage.usageLimited', { used: formatBytes(bytes), limit: formatBytes(limit), backend })
+      : t('storage.usage', { used: formatBytes(bytes), backend });
+  }).catch(() => {});
+}
+
+function toggleToc() {
+  const sidebar = document.getElementById('toc-sidebar');
+  const backdrop = document.getElementById('toc-backdrop');
+  if (!sidebar) return;
+  const willShow = !sidebar.classList.contains('open');
+  if (willShow) renderTocList();
+  sidebar.classList.toggle('open');
+  if (backdrop) backdrop.classList.toggle('open');
+}
+
+function hideToc() {
+  const sidebar = document.getElementById('toc-sidebar');
+  const backdrop = document.getElementById('toc-backdrop');
+  if (sidebar) sidebar.classList.remove('open');
+  if (backdrop) backdrop.classList.remove('open');
+}
+
+function wireToc() {
+  const btn = document.getElementById('btn-toggle-toc');
+  if (btn) btn.addEventListener('click', toggleToc);
+  const closeBtn = document.getElementById('btn-close-toc');
+  if (closeBtn) closeBtn.addEventListener('click', hideToc);
+  const backdrop = document.getElementById('toc-backdrop');
+  if (backdrop) backdrop.addEventListener('click', hideToc);
+}
+
+// ============================================================
+// Keyboard shortcuts
+// ============================================================
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+}
+
+function wireKeyboardShortcuts() {
+  document.addEventListener('keydown', (e) => {
+    if (isTypingTarget(document.activeElement)) return;
+
+    if (e.key === 'Escape') {
+      const settingsOpen = !document.getElementById('settings-overlay').classList.contains('hidden');
+      if (settingsOpen) { closeSettings(); return; }
+      if (!panelEl.classList.contains('collapsed')) { togglePanel(); return; }
+      hideToc();
+      return;
+    }
+
+    const settingsOpen = !document.getElementById('settings-overlay').classList.contains('hidden');
+    if (settingsOpen) return;
+
+    if (e.key === 'ArrowLeft' || e.key === 'h') {
+      e.preventDefault();
+      goToPage(currentPage - 1);
+    } else if (e.key === 'ArrowRight' || e.key === 'l') {
+      e.preventDefault();
+      goToPage(currentPage + 1);
+    }
+  });
+}
+
+// ============================================================
+// Panel toggle
+// ============================================================
+const panelEl = document.getElementById('panel');
+function togglePanel() {
+  panelEl.classList.toggle('collapsed');
+  const btn = document.getElementById('btn-toggle-panel');
+  btn.textContent = panelEl.classList.contains('collapsed') ? t('toolbar.showSidebar') : t('toolbar.hideSidebar');
+}
+
+// ============================================================
+// Click handling + caching
+// ============================================================
+async function onSentenceClick(span, sentenceText) {
+  // A sentence interrupted by a footnote is rendered as several spans; the
+  // whole sentence must light up, not just the half that was clicked.
+  if (activeSpan) {
+    spansForSentence(activeSpan.dataset.sid).forEach((el) => el.classList.remove('active'));
+  }
+  spansForSentence(span.dataset.sid).forEach((el) => el.classList.add('active'));
+  activeSpan = span;
+
+  if (panelEl.classList.contains('collapsed')) togglePanel();
+
+  const cacheKey = cacheKeyFor(sentenceText);
+  const paraIdx = parseInt(span.dataset.paraIdx, 10);
+  const contextParagraph = Number.isFinite(paraIdx) ? PARAGRAPHS[paraIdx] : '';
+  renderQuote(sentenceText);
+
+  // A click within the first few milliseconds of opening a chapter would
+  // otherwise read an empty map and pay for an analysis already on disk.
+  await cacheWarmPromise;
+  if (activeSpan !== span) return; // moved on while waiting
+
+  if (cache.has(cacheKey)) {
+    renderResult(cache.get(cacheKey), sentenceText);
+    return;
+  }
+
+  renderLoading();
+  try {
+    const result = await analyzeSentence(sentenceText, contextParagraph);
+    cache.set(cacheKey, result);
+    persistCacheDebounced();
+    if (activeSpan === span) renderResult(result, sentenceText);
+  } catch (err) {
+    const errResult = { error: (err && err.message) || String(err) };
+    cache.set(cacheKey, errResult);
+    if (activeSpan === span) renderResult(errResult, sentenceText);
+  }
+}
+
+// Throws away the cached analysis of the sentence in the panel and asks again.
+// Used both by the error-state retry button and by the "re-analyse" button on a
+// successful result (the reader didn't like the answer, or switched model and
+// wants this one sentence redone rather than the whole cache emptied).
+// The span's own text is only one segment of the sentence -- the full analysed
+// text has to be used or it would key a different cache entry.
+function reanalyzeActiveSentence() {
+  if (!activeSpan) return;
+  const full = sentenceTexts.get(Number(activeSpan.dataset.sid)) || activeSpan.textContent;
+  cache.delete(cacheKeyFor(full));
+  persistCacheDebounced(); // don't let the discarded entry survive a reload
+  onSentenceClick(activeSpan, full);
+}
+
+function renderQuote(text) {
+  const q = document.getElementById('panel-quote');
+  q.style.display = 'block';
+  q.textContent = text;
+}
+
+function renderLoading() {
+  const body = document.getElementById('panel-body');
+  // aria-busy tells assistive tech the region is mid-update, so it waits and
+  // announces the finished analysis instead of the spinner
+  body.setAttribute('aria-busy', 'true');
+  body.innerHTML = `<div class="loading-row"><div class="spinner"></div>${t('panel.loading')}</div>`;
+}
+
+function renderResult(result, sentenceText) {
+  const panelBody = document.getElementById('panel-body');
+  if (panelBody) panelBody.setAttribute('aria-busy', 'false');
+  const body = document.getElementById('panel-body');
+  if (result.error) {
+    body.innerHTML = `
+      <div class="error-box">${escapeHtml(result.error)}</div>
+      <button class="retry-btn" id="retry-btn">${t('panel.retry')}</button>
+    `;
+    const retryBtn = document.getElementById('retry-btn');
+    if (retryBtn) retryBtn.addEventListener('click', reanalyzeActiveSentence);
+    return;
+  }
+
+  // history[0]/[1] are the first structured Q&A (already shown via the tabs
+  // above); anything after that is follow-up chat.
+  const followUps = (result.history || []).slice(2);
+
+  body.innerHTML = `
+    <div class="section-tabs">
+      <button class="tab-btn active" data-tab="grammar">${t('panel.tabGrammar')}</button>
+      <button class="tab-btn" data-tab="vocab">${t('panel.tabVocab')}</button>
+      <button class="reanalyze-btn" id="reanalyze-btn" title="${escapeHtml(t('panel.reanalyze'))}"
+              aria-label="${escapeHtml(t('panel.reanalyze'))}">⟳</button>
+    </div>
+    <div class="tab-panel active" data-tab="grammar"><div class="analysis-md">${result.grammarHtml}</div></div>
+    <div class="tab-panel" data-tab="vocab"><div class="analysis-md">${result.vocabHtml}</div></div>
+    <div class="chat-section">
+      <div class="chat-thread" id="chat-thread">${renderChatTurns(followUps)}</div>
+      <div class="chat-input-row">
+        <textarea id="chat-input" rows="1" placeholder="${escapeHtml(t('chat.placeholder'))}"></textarea>
+        <button id="chat-send-btn" class="btn primary">${t('chat.send')}</button>
+      </div>
+    </div>
+  `;
+  body.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      body.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      body.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      body.querySelector(`.tab-panel[data-tab="${btn.dataset.tab}"]`).classList.add('active');
+    });
+  });
+
+  const reanalyzeBtn = document.getElementById('reanalyze-btn');
+  if (reanalyzeBtn) reanalyzeBtn.addEventListener('click', reanalyzeActiveSentence);
+
+  const thread = document.getElementById('chat-thread');
+  if (thread) thread.scrollTop = thread.scrollHeight;
+  wireChatInput(result, sentenceText);
+}
+
+function renderChatTurns(turns) {
+  let html = '';
+  for (let i = 0; i < turns.length; i += 2) {
+    const userMsg = turns[i];
+    const assistantMsg = turns[i + 1];
+    if (userMsg) html += `<div class="chat-bubble chat-user">${escapeHtml(userMsg.content)}</div>`;
+    if (assistantMsg) html += `<div class="chat-bubble chat-assistant"><div class="analysis-md">${mdToHtml(assistantMsg.content)}</div></div>`;
+  }
+  return html;
+}
+
+function wireChatInput(result, sentenceText) {
+  const btn = document.getElementById('chat-send-btn');
+  const input = document.getElementById('chat-input');
+  const thread = document.getElementById('chat-thread');
+  if (!btn || !input || !thread) return;
+
+  const send = async () => {
+    const msg = input.value.trim();
+    if (!msg || btn.disabled) return;
+    input.value = '';
+    btn.disabled = true;
+
+    thread.insertAdjacentHTML('beforeend', `<div class="chat-bubble chat-user">${escapeHtml(msg)}</div>`);
+    thread.insertAdjacentHTML('beforeend', `<div class="chat-bubble chat-assistant chat-pending" id="chat-pending"><div class="spinner"></div></div>`);
+    thread.scrollTop = thread.scrollHeight;
+
+    try {
+      const responseText = await sendFollowUp(result, msg);
+      const pending = document.getElementById('chat-pending');
+      if (pending) pending.outerHTML = `<div class="chat-bubble chat-assistant"><div class="analysis-md">${mdToHtml(responseText)}</div></div>`;
+      const cacheKey = cacheKeyFor(sentenceText);
+      cache.set(cacheKey, result);
+      persistCacheDebounced();
+    } catch (err) {
+      const pending = document.getElementById('chat-pending');
+      const msgText = (err && err.message) || String(err);
+      if (pending) pending.outerHTML = `<div class="chat-bubble chat-assistant chat-error">${escapeHtml(msgText)}</div>`;
+    } finally {
+      btn.disabled = false;
+      thread.scrollTop = thread.scrollHeight;
+    }
+  };
+
+  btn.addEventListener('click', send);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  });
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function mdToHtml(md) {
+  if (!md) return '';
+  const lines = md.split('\n');
+  let html = '';
+  let inList = false;
+  let listType = null;
+
+  function closeList() {
+    if (inList) { html += listType === 'ol' ? '</ol>' : '</ul>'; inList = false; listType = null; }
+  }
+
+  for (let raw of lines) {
+    const line = raw.trim();
+    if (!line) { closeList(); continue; }
+    let m;
+    if ((m = line.match(/^####\s+(.*)/))) { closeList(); html += `<h4>${inlineMd(m[1])}</h4>`; continue; }
+    if ((m = line.match(/^###\s+(.*)/))) { closeList(); html += `<h4>${inlineMd(m[1])}</h4>`; continue; }
+    if ((m = line.match(/^##\s+(.*)/))) { closeList(); html += `<h3>${inlineMd(m[1])}</h3>`; continue; }
+    if ((m = line.match(/^#\s+(.*)/))) { closeList(); html += `<h3>${inlineMd(m[1])}</h3>`; continue; }
+    if ((m = line.match(/^[-*]\s+(.*)/))) {
+      if (!inList || listType !== 'ul') { closeList(); html += '<ul>'; inList = true; listType = 'ul'; }
+      html += `<li>${inlineMd(m[1])}</li>`;
+      continue;
+    }
+    if ((m = line.match(/^\d+\.\s+(.*)/))) {
+      if (!inList || listType !== 'ol') { closeList(); html += '<ol>'; inList = true; listType = 'ol'; }
+      html += `<li>${inlineMd(m[1])}</li>`;
+      continue;
+    }
+    // Indented continuation of the current bullet (markdown "lazy" continuation
+    // lines). The per-clause translation lines the prompt now asks for arrive
+    // exactly this way; without this they would close the list and render as a
+    // stray paragraph, with every following bullet starting a fresh <ul>.
+    if (inList && /^\s/.test(raw) && html.endsWith('</li>')) {
+      html = html.slice(0, -'</li>'.length) + `<br>${inlineMd(line)}</li>`;
+      continue;
+    }
+    closeList();
+    html += `<p>${inlineMd(line)}</p>`;
+  }
+  closeList();
+  return html;
+}
+
+function inlineMd(text) {
+  let t = escapeHtml(text);
+  t = t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  t = t.replace(/`(.+?)`/g, '<code>$1</code>');
+  t = t.replace(/\*(.+?)\*/g, '<span class="de">$1</span>');
+  return t;
+}
+
+// ============================================================
+// Claude API call (BYO key — see settings modal)
+// ============================================================
+const OUTPUT_LANG_NAMES = {
+  cs: 'Čeština',
+  de: 'Deutsch',
+  en: 'English',
+  es: 'Español (España)',
+  fr: 'Français',
+  it: 'Italiano',
+  ja: '日本語',
+  ko: '한국어',
+  pl: 'Polski',
+  'pt-br': 'Português (Brasil)',
+  ru: 'Русский',
+  tr: 'Türkçe',
+  uk: 'Українська',
+  zh: '简体中文',
+  'zh-hant': '繁體中文',
+};
+
+// The three literal strings the model has to emit verbatim: the two section
+// headings and the label in front of the whole-sentence translation.
+//
+// Why a hardcoded table instead of just telling the model "write the labels in
+// the output language too": weaker/cheaper models (Gemini Flash Lite, small
+// OpenAI-compatible models) ignore a prose instruction and fall back to the
+// most common shape in their training data, which is the Chinese "译文：".
+// Handing them the exact literal to copy is far more reliable than asking them
+// to translate a concept, and it also makes the response parser deterministic
+// instead of having to guess which language the headings came out in.
+const OUTPUT_LANG_TERMS = {
+  cs:        { structure: 'Stavba věty', vocab: 'Slovní zásoba', translation: 'Překlad' },
+  de:        { structure: 'Satzstruktur', vocab: 'Wortschatz', translation: 'Übersetzung' },
+  en:        { structure: 'Sentence structure', vocab: 'Vocabulary', translation: 'Translation' },
+  es:        { structure: 'Estructura de la oración', vocab: 'Vocabulario', translation: 'Traducción' },
+  fr:        { structure: 'Structure de la phrase', vocab: 'Vocabulaire', translation: 'Traduction' },
+  it:        { structure: 'Struttura della frase', vocab: 'Vocabolario', translation: 'Traduzione' },
+  ja:        { structure: '文の構造', vocab: '語彙', translation: '訳文' },
+  ko:        { structure: '문장 구조', vocab: '어휘', translation: '번역' },
+  pl:        { structure: 'Budowa zdania', vocab: 'Słownictwo', translation: 'Tłumaczenie' },
+  'pt-br':   { structure: 'Estrutura da frase', vocab: 'Vocabulário', translation: 'Tradução' },
+  ru:        { structure: 'Структура предложения', vocab: 'Лексика', translation: 'Перевод' },
+  tr:        { structure: 'Cümle yapısı', vocab: 'Kelimeler', translation: 'Çeviri' },
+  uk:        { structure: 'Структура речення', vocab: 'Лексика', translation: 'Переклад' },
+  zh:        { structure: '句子结构', vocab: '难词与短语', translation: '译文' },
+  'zh-hant': { structure: '句子結構', vocab: '難詞與短語', translation: '譯文' },
+};
+
+// For a custom (free-text) output language we have no literal to hand over, so
+// fall back to English headings -- an unambiguous fixed target still beats
+// letting the model pick, and the parser then always knows what to look for.
+function currentOutputTerms() {
+  return OUTPUT_LANG_TERMS[settings.outputLang] || OUTPUT_LANG_TERMS.en;
+}
+
+// The full-width colon belongs to CJK typography and looks like a typo
+// everywhere else -- "Translation：" in an English analysis is wrong the same
+// way "译文:" is wrong in a Chinese one. This used to be hardcoded as ：for
+// all fifteen output languages.
+const FULLWIDTH_COLON_LANGS = new Set(['zh', 'zh-hant', 'ja']);
+
+function translationLabel() {
+  const colon = FULLWIDTH_COLON_LANGS.has(settings.outputLang) ? '：' : ':';
+  return '**' + currentOutputTerms().translation + colon + '**';
+}
+
+function buildSystemPrompt() {
+  const outLangName = settings.outputLang === 'custom'
+    ? (settings.customOutputLang || '简体中文')
+    : (OUTPUT_LANG_NAMES[settings.outputLang] || '简体中文');
+  const terms = currentOutputTerms();
+  const transLabel = translationLabel();
+  return `你是一位专业的外语文本精读助手，正在帮助一位读者逐句精读一段外语原文。
+原文可能来自任何来源（文学作品、书信、报刊等），句子可能包含复杂的从句嵌套、书面语、专业术语或历史/文化背景词汇。
+
+用户消息里可能会附带这句话所在的完整段落作为背景（帮助你理解代词指代、前后承接关系），但你分析和引用的对象必须严格限定在用户明确要求分析的那一句话本身，禁止跨出这句话的边界去解释、引用或讨论背景段落里其它句子中出现、但不在目标句子里的内容。
+
+最重要的格式规则（优先级高于本提示词里的其它一切要求）：你输出的每一个字，包括两个二级标题和所有标签词，都必须用【${outLangName}】书写，绝对不允许出现中文标签（除非【${outLangName}】本身就是中文）。下面这三个字符串必须一字不差地照抄，禁止改写、禁止翻译成别的语言、禁止换成你自己习惯的说法：
+- 第一个二级标题必须写作：## ${terms.structure}
+- 第二个二级标题必须写作：## ${terms.vocab}
+- 整句翻译前面的标签必须写作：${transLabel}
+
+请针对用户给出的单一句子，用【${outLangName}】输出两部分内容，严格套用下面这个模板（不要输出模板以外的内容，不要重复原句全文作为标题）：
+
+## ${terms.structure}
+${transLabel}〈这里填这句话完整、通顺、自然的整句翻译〉
+〈这里填后续列点；其中每个从句的列点写成两行，形如〉
+- 〈从句类型 + 引导词 + 修饰/补充主句的哪个成分〉
+  ${transLabel}〈这个从句部分的译文〉
+
+## ${terms.vocab}
+〈这里填词条列点〉
+
+模板各部分的具体写法要求：
+
+## ${terms.structure}
+- 第一行必须是 ${transLabel} 开头，后面接这句话完整、通顺、自然的整句翻译（不是逐词直译），
+  让读者不需要追问就能看懂整句话的意思。再说一次：这个标签必须原样写成 ${transLabel}。
+- 然后另起一句话概括整句大意（不是翻译，是更进一步的内容/语气/言外之意概括）。
+- 然后拆解句子的主干：主句的主语、谓语、宾语分别是什么（可直接引用原文词/短语，用 *斜体* 标出）。
+- 如果有从句（定语从句、状语从句、宾语从句等），逐个说明每个从句的类型、引导词、以及它修饰/补充的是主句中的哪个成分。
+  每一个从句都必须**另起一行**、按下面这个模板补上这个从句本身的译文（只说明类型和修饰对象、不给译文，读者仍然不知道这半句在说什么）：
+  \`${transLabel}〈这个从句部分的译文〉\`
+  这个标签同样必须一字不差地写成 ${transLabel}。
+- 如果句子里有插入语、同位语、分词结构或省略成分，也请指出；其中自成意群的部分（如同位语、插入语）同样按上面的模板附上 ${transLabel} 一行。
+- 保持简洁，用列点呈现，不要写成大段散文。
+
+## ${terms.vocab}
+- 列出这句话里较生僻、较书面、或带有特殊语境色彩的词汇或短语（不用列出简单常见词）。
+- 极其重要：词条只能从【用户要求分析的这一句话本身】中挑选，禁止选取仅出现在你收到的上下文段落、但没有出现在这句话原文里的词/短语——上下文段落只是用来帮你理解代词指代和前后文关系的背景资料，不是分析对象。如果不确定某个词是否真的出现在目标句子里，就不要列出它。
+- 每个词条格式：*原词* — 释义，并按词性附加以下信息（不适用的项跳过，不要生造不存在的变化形式）：
+  - 名词：标出语法性/词性（如德语的 der/die/das，法语、俄语等语言的阳性/阴性/中性等，视该语言实际语法特点而定；分析中文、英文等没有语法性的语言则跳过这一项），以及复数形式。
+  - 动词：标出该语言里对识别这个词有帮助的核心变位形式（例如德语给出第三人称单数现在时、过去式 Präteritum、过去分词 Partizip II 三种形式；其他语言按该语言惯例给出对应的原形/变位提示）。
+  - 形容词等其他词性：如有值得注意的变格/比较级等形式也可以简要补充，没有就不提。
+- 如果句子里夹杂其他语言的词汇，也一并标注并解释。
+- 如果没有特别难的词，可以写一句说明这句话用词较为平易，不要为了凑数硬找词。
+
+只输出 ## ${terms.structure} 和 ## ${terms.vocab} 这两个 Markdown 二级标题 section 的内容，不要有其它前言或总结。全部使用【${outLangName}】书写（专有名词、原文引用除外）；两个标题和 ${transLabel} 标签必须与上面给定的字符串完全一致。
+
+如果用户在这之后继续追问（例如追问某个词、某个从句，或提出其他相关问题），请直接用自然语言回答那个具体问题即可，不需要再重复上面的两个标题格式，同样全程使用【${outLangName}】。`;
+}
+
+// The first turn optionally includes the sentence's enclosing paragraph as
+// context (for resolving pronouns/references) without it being the object
+// of analysis itself -- only `sentenceText` is what gets analyzed.
+function buildFirstTurnUserText(sentenceText, contextParagraph) {
+  const trimmedContext = (contextParagraph || '').trim();
+  if (trimmedContext && trimmedContext !== sentenceText.trim()) {
+    return `以下是这句话所在的完整段落，仅供理解上下文（如代词指代、前后承接关系），不需要单独分析：\n\n${trimmedContext}\n\n请分析其中这一句：\n\n${sentenceText}`;
+  }
+  return `请分析这句话：\n\n${sentenceText}`;
+}
+
+// ============================================================
+// Multi-provider abstraction: Anthropic (native, with the claude.ai sandbox
+// dual-mode fallback), OpenAI-compatible (covers OpenAI itself, and any
+// service exposing the same /chat/completions shape: DeepSeek, Groq, local
+// Ollama, etc — just point baseUrl at it), and Google Gemini.
+// ============================================================
+const PROVIDER_LABELS = {
+  anthropic: 'Anthropic Claude',
+  openai: 'OpenAI',
+  gemini: 'Google Gemini',
+};
+
+// `messages` is provider-agnostic: [{ role: 'user'|'assistant', content: string }, ...]
+// in chronological order. Used both for the first analysis turn (a single
+// user message) and for follow-up chat (the full running history).
+function buildProviderRequest(provider, ps, systemPrompt, messages) {
+  if (provider === 'openai') {
+    const baseUrl = (ps.baseUrl || PROVIDER_DEFAULTS.openai.baseUrl).replace(/\/+$/, '');
+    return {
+      url: `${baseUrl}/chat/completions`,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${ps.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: ps.model || PROVIDER_DEFAULTS.openai.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          ...messages.map(m => ({ role: m.role, content: m.content })),
+        ],
+      }),
+    };
+  }
+  if (provider === 'gemini') {
+    const baseUrl = (ps.baseUrl || PROVIDER_DEFAULTS.gemini.baseUrl).replace(/\/+$/, '');
+    const model = ps.model || PROVIDER_DEFAULTS.gemini.model;
+    return {
+      url: `${baseUrl}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(ps.apiKey)}`,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        // Gemini calls the AI turn "model", not "assistant"
+        contents: messages.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+      }),
+    };
+  }
+  // anthropic (default) — dual-mode: with a key, BYO-key direct-browser
+  // headers; without one, assume the claude.ai artifact sandbox proxy (or,
+  // if baseUrl points at a local proxy that injects its own key, that's
+  // exactly what we want too: no browser-side auth header).
+  const hasKey = !!ps.apiKey;
+  const anthropicBase = (ps.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '');
+  const headers = { 'Content-Type': 'application/json' };
+  if (hasKey) {
+    headers['x-api-key'] = ps.apiKey;
+    headers['anthropic-version'] = '2023-06-01';
+    headers['anthropic-dangerous-direct-browser-access'] = 'true';
+  }
+  return {
+    url: `${anthropicBase}/v1/messages`,
+    headers,
+    body: JSON.stringify({
+      model: ps.model || PROVIDER_DEFAULTS.anthropic.model,
+      max_tokens: 1000,
+      system: systemPrompt,
+      messages: messages.map(m => ({ role: m.role, content: m.content })),
+    }),
+  };
+}
+
+function extractProviderText(provider, data) {
+  if (provider === 'openai') {
+    return (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+  }
+  if (provider === 'gemini') {
+    const parts = data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts;
+    return (parts || []).map(p => p.text || '').join('');
+  }
+  const textBlocks = (data.content || []).filter(b => b.type === 'text').map(b => b.text);
+  return textBlocks.join('\n');
+}
+
+async function callProvider(systemPrompt, messages) {
+  const provider = settings.provider || 'anthropic';
+  const ps = currentProviderSettings();
+  const hasKey = !!ps.apiKey;
+
+  // Only Anthropic has a keyless fallback (the claude.ai sandbox proxy).
+  // OpenAI/Gemini calls always need a user-supplied key.
+  if (!hasKey && provider !== 'anthropic') {
+    throw new Error(t('errors.providerKeyRequired', { provider: PROVIDER_LABELS[provider] || provider }));
+  }
+
+  const req = buildProviderRequest(provider, ps, systemPrompt, messages);
+
+  let response;
+  try {
+    response = await fetch(req.url, { method: 'POST', headers: req.headers, body: req.body });
+  } catch (networkErr) {
+    // fetch() itself throws (rather than resolving with a bad status) on
+    // network failures, including CORS preflight rejections
+    if (!hasKey) throw new Error(t('errors.noKeyNetworkFail'));
+    throw new Error(t('errors.networkFail'));
+  }
+
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const errJson = await response.json();
+      detail = errJson && errJson.error && errJson.error.message ? `：${errJson.error.message}` : '';
+    } catch (e) { /* body may not be JSON */ }
+    if (!hasKey) throw new Error(t('errors.noKeyStatusFail', { status: response.status, detail }));
+    if (response.status === 401 || response.status === 403) throw new Error(t('errors.invalidKey', { detail }));
+    if (response.status === 429) throw new Error(t('errors.rateLimited', { detail }));
+    throw new Error(t('errors.apiFailed', { status: response.status, detail }));
+  }
+
+  const data = await response.json();
+  const fullText = extractProviderText(provider, data);
+  if (!fullText || !fullText.trim()) throw new Error(t('errors.emptyResponse'));
+  return fullText;
+}
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Belt-and-braces for weak models that ignore the literal template in the
+// system prompt and emit a label from another language anyway (in practice
+// almost always the Chinese "译文：", the most common shape in training data).
+// If the analysis uses *any* known language's translation label but not the one
+// we asked for, rewrite just that label. Deliberately conservative: only an
+// exact match for a term we ourselves ship, and only where it stands as a label
+// at the start of a line (optionally as a list item) -- we never rewrite model
+// prose. Every occurrence is rewritten, not just the first: since the prompt
+// now also asks for a translation line per subordinate clause, the same label
+// legitimately appears several times in one response.
+function normalizeTranslationLabel(text) {
+  const want = currentOutputTerms().translation;
+  const known = Object.keys(OUTPUT_LANG_TERMS).map(k => OUTPUT_LANG_TERMS[k].translation);
+  const alt = known.filter(w => w !== want).map(escapeRegExp).join('|');
+  if (!alt) return text;
+  // Matches "**译文：**", "**译文:**", "**译文**：" and the unbolded variants,
+  // anchored at the start of a line (after any indent/bullet) so mid-sentence
+  // mentions are left alone.
+  const re = new RegExp(
+    '^([ \\t]*(?:[-*+][ \\t]+|\\d+\\.[ \\t]+)?)(?:\\*\\*)?(' + alt + ')(?:\\*\\*)?[ \\t]*[：:][ \\t]*(?:\\*\\*)?',
+    'gm');
+  return text.replace(re, (m, prefix) => prefix + translationLabel() + ' ');
+}
+
+// Locate the two sections. First try the exact headings we asked for, then any
+// heading term we know from OUTPUT_LANG_TERMS (covers a model that translated
+// the heading into a different language than requested), and finally fall back
+// to positional splitting on the first two `##` headings so a stubbornly
+// off-script response still renders in the right panes instead of dumping
+// everything into the grammar box.
+function splitAnalysisSections(fullText) {
+  const terms = currentOutputTerms();
+  const allStruct = [terms.structure].concat(Object.keys(OUTPUT_LANG_TERMS).map(k => OUTPUT_LANG_TERMS[k].structure));
+  const allVocab = [terms.vocab].concat(Object.keys(OUTPUT_LANG_TERMS).map(k => OUTPUT_LANG_TERMS[k].vocab));
+  // '难词与短语' historically also came back as '难词短语' / '生词与短语'.
+  const vocabAlt = allVocab.concat(['难词短语', '難詞短語', '生词与短语']).map(escapeRegExp).join('|');
+  const structAlt = allStruct.map(escapeRegExp).join('|');
+
+  const grammarMatch = fullText.match(
+    new RegExp('##\\s*(?:' + structAlt + ')\\s*([\\s\\S]*?)(?=##\\s*(?:' + vocabAlt + ')|$)', 'i'));
+  const vocabMatch = fullText.match(
+    new RegExp('##\\s*(?:' + vocabAlt + ')\\s*([\\s\\S]*)', 'i'));
+
+  if (grammarMatch || vocabMatch) {
+    return {
+      grammarMd: grammarMatch ? grammarMatch[1].trim() : fullText.trim(),
+      vocabMd: vocabMatch ? vocabMatch[1].trim() : t('errors.vocabParseFailed'),
+    };
+  }
+
+  // Positional fallback: whatever the two `##` headings are called.
+  const headings = [];
+  const headingRe = /^##[ \t]*(.*)$/gm;
+  let m;
+  while ((m = headingRe.exec(fullText)) !== null) headings.push(m);
+  if (headings.length >= 2) {
+    return {
+      grammarMd: fullText.slice(headings[0].index + headings[0][0].length, headings[1].index).trim(),
+      vocabMd: fullText.slice(headings[1].index + headings[1][0].length).trim(),
+    };
+  }
+  return { grammarMd: fullText.trim(), vocabMd: t('errors.vocabParseFailed') };
+}
+
+async function analyzeSentence(sentenceText, contextParagraph) {
+  const systemPrompt = buildSystemPrompt();
+  const userText = buildFirstTurnUserText(sentenceText, contextParagraph);
+  const fullText = await callProvider(systemPrompt, [{ role: 'user', content: userText }]);
+
+  const { grammarMd, vocabMd } = splitAnalysisSections(normalizeTranslationLabel(fullText));
+
+  return {
+    grammarHtml: mdToHtml(grammarMd),
+    vocabHtml: mdToHtml(vocabMd),
+    history: [
+      { role: 'user', content: userText },
+      { role: 'assistant', content: fullText },
+    ],
+  };
+}
+
+// ============================================================
+// Conversational follow-up: reuses the same system prompt + growing
+// message history, so the model keeps the sentence (and first analysis)
+// in context for subsequent questions.
+// ============================================================
+async function sendFollowUp(result, followUpText) {
+  const systemPrompt = buildSystemPrompt();
+  result.history = result.history || [];
+  result.history.push({ role: 'user', content: followUpText });
+  const responseText = await callProvider(systemPrompt, result.history);
+  result.history.push({ role: 'assistant', content: responseText });
+  return responseText;
+}
+</script>

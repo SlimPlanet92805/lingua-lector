@@ -1,0 +1,293 @@
+<div class="app">
+  <div class="toc-backdrop" id="toc-backdrop"></div>
+  <div class="toc-sidebar" id="toc-sidebar">
+    <div class="toc-sidebar-header">
+      <h2 data-i18n="toc.title">目录</h2>
+      <button class="panel-close" id="btn-close-toc" data-i18n-label="toc.closeLabel">✕</button>
+    </div>
+    <ul class="toc-list" id="toc-list"></ul>
+  </div>
+
+  <div class="reader-wrap">
+    <div class="toolbar">
+      <button id="btn-toggle-toc" data-i18n="toolbar.toc">📖 目录</button>
+      <button id="btn-toggle-panel" data-i18n="toolbar.hideSidebar">隐藏侧栏</button>
+      <button class="pager-prev" data-i18n="toolbar.prevPage">← 上一页</button>
+      <span class="pager-status"><span class="pager-status-prefix" data-i18n="toolbar.pagerPrefix">第 </span><input type="number" class="pager-page-input" min="1" value="1" data-i18n-label="toolbar.pageInputLabel"> / <span class="pager-total">1</span><span class="pager-status-suffix" data-i18n="toolbar.pagerSuffix"> 页</span></span>
+      <button class="pager-next" data-i18n="toolbar.nextPage">下一页 →</button>
+      <button id="btn-open-settings" data-i18n="toolbar.openSettings">⚙ 设置</button>
+      <span class="hint" data-i18n="toolbar.hint">点击任意句子查看语法与词汇解析 · 快捷键 ← → 翻页 · Esc 关闭</span>
+    </div>
+    <div class="reader-inner">
+      <div class="book-header">
+        <input class="book-title-input" id="book-title-field" value="Elisabeth von Heyking · Tagebücher aus vier Weltteilen" data-i18n-placeholder="book.titlePlaceholder" placeholder="作品名 / 作者（可编辑）">
+        <input class="chapter-title-input" id="chapter-title-field" value="Chile (Valparaiso)" data-i18n-placeholder="book.chapterPlaceholder" placeholder="章节标题">
+        <input class="chapter-dates-input hidden" id="chapter-dates-field" value="Juli 1886 bis Februar 1889" data-i18n-placeholder="book.datesPlaceholder" placeholder="副标题 / 日期范围（可选）">
+        <button class="add-dates-btn hidden" id="btn-add-dates" data-i18n="book.addDateRange">+ 添加副标题/日期范围</button>
+      </div>
+      <div class="divider"></div>
+      <div id="text-container"><div id="text-columns"></div></div>
+      <div class="bottom-pager" id="bottom-pager-wrap">
+        <button class="pager-prev" data-i18n="toolbar.prevPage">← 上一页</button>
+        <span class="pager-status"><span class="pager-status-prefix" data-i18n="toolbar.pagerPrefix">第 </span><input type="number" class="pager-page-input" min="1" value="1" data-i18n-label="toolbar.pageInputLabel"> / <span class="pager-total">1</span><span class="pager-status-suffix" data-i18n="toolbar.pagerSuffix"> 页</span></span>
+        <button class="pager-next" data-i18n="toolbar.nextPage">下一页 →</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" id="panel" role="region" aria-labelledby="panel-title">
+    <div class="panel-header">
+      <h2 id="panel-title" data-i18n="panel.title">句子解析</h2>
+      <button class="panel-close" id="btn-close-panel" data-i18n-title="panel.closeTitle" data-i18n-label="panel.closeTitle" title="收起侧栏">→</button>
+    </div>
+    <div class="panel-quote" id="panel-quote" style="display:none;"></div>
+    <div class="panel-body" id="panel-body" aria-live="polite" aria-busy="false">
+      <div class="panel-empty" id="panel-empty-msg" data-i18n="panel.emptyMsg">点击左侧正文中的任意一句，<br>这里会显示句子结构拆解和词汇讲解。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Settings Modal ============ -->
+<div class="modal-overlay hidden" id="settings-overlay">
+  <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-header">
+      <h2 id="settings-title" data-i18n="settings.title">设置</h2>
+      <button class="modal-close" id="btn-close-settings" data-i18n-label="settings.closeLabel">✕</button>
+    </div>
+
+    <div class="settings-tabs" id="settings-tabs">
+      <button class="settings-tab-btn active" data-settings-tab="ai" data-i18n="settings.tabAi">AI 与模型</button>
+      <button class="settings-tab-btn" data-settings-tab="lang" data-i18n="settings.tabLang">语言</button>
+      <button class="settings-tab-btn" data-settings-tab="appearance" data-i18n="settings.tabAppearance">外观</button>
+      <button class="settings-tab-btn" data-settings-tab="document" data-i18n="settings.tabDocument">文档</button>
+    </div>
+
+    <div class="modal-body">
+
+      <div class="settings-tab-panel active" data-settings-tab="ai">
+        <div class="field-group">
+          <label data-i18n="settings.providerLabel">AI 服务商</label>
+          <div class="field-desc" data-i18n="settings.providerDesc">
+            每个服务商的 key / 模型 / 接口地址分开保存，切换服务商不会丢失其它服务商已填的信息。
+            所有 key 只存在这台设备浏览器的本地存储（localStorage）中，不会上传到任何服务器（本工具没有后端）。
+            请勿在公用/共享电脑上保存 key。
+          </div>
+          <div class="radio-row" id="provider-chips">
+            <div class="radio-chip" data-provider="anthropic">Anthropic Claude</div>
+            <div class="radio-chip" data-provider="openai" data-i18n="settings.providerOpenaiCompatible">OpenAI 兼容</div>
+            <div class="radio-chip" data-provider="gemini">Google Gemini</div>
+          </div>
+        </div>
+
+        <div class="field-group" id="provider-fields-anthropic">
+          <label>Anthropic API Key</label>
+          <div class="field-desc" data-i18n="settings.anthropicDesc">
+            可在 <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> 申请。
+            留空时会自动尝试假设本工具运行在 claude.ai 的 artifact 沙盒里（沙盒有自己的鉴权代理）。
+          </div>
+          <input type="password" id="anthropic-key-input" placeholder="sk-ant-...">
+          <label style="margin-top:14px;" data-i18n="settings.modelLabel">模型</label>
+          <input type="text" id="anthropic-model-input" list="anthropic-model-suggestions" placeholder="claude-sonnet-5">
+          <datalist id="anthropic-model-suggestions">
+            <option value="claude-sonnet-5">
+            <option value="claude-opus-5">
+            <option value="claude-opus-4-8">
+            <option value="claude-haiku-4-5">
+          </datalist>
+          <label style="margin-top:14px;" data-i18n="settings.baseUrlOptionalLabel">接口地址（可选，留空用官方地址）</label>
+          <input type="text" id="anthropic-baseurl-input" placeholder="https://api.anthropic.com">
+          <div class="key-warning" data-i18n="settings.anthropicWarning">
+            ℹ️ 本工具已通过 <code>anthropic-dangerous-direct-browser-access</code> 请求头启用浏览器直连，
+            正常情况下无需额外代理即可使用。但请注意：把 key 直接放进前端代码/浏览器本地存储，意味着任何能访问这台设备浏览器数据的人
+            理论上都能取得这个 key。不要在公用/共享电脑上保存，不建议长期使用高额度 key，可在控制台单独为这个用途创建一个限额较低的 key。
+          </div>
+        </div>
+
+        <div class="field-group hidden" id="provider-fields-openai">
+          <label>OpenAI API Key</label>
+          <div class="field-desc" data-i18n="settings.openaiDesc">
+            适用于 OpenAI 官方，以及任何暴露相同 <code>/chat/completions</code> 接口的兼容服务
+            （DeepSeek、Groq、本地 Ollama 等）——把下面的接口地址换成对应服务的地址即可。
+          </div>
+          <input type="password" id="openai-key-input" placeholder="sk-...">
+          <label style="margin-top:14px;" data-i18n="settings.baseUrlLabel">接口地址（Base URL）</label>
+          <input type="text" id="openai-baseurl-input" placeholder="https://api.openai.com/v1">
+          <label style="margin-top:14px;" data-i18n="settings.modelLabel">模型</label>
+          <input type="text" id="openai-model-input" list="openai-model-suggestions" placeholder="gpt-5.6-luna">
+          <datalist id="openai-model-suggestions">
+            <option value="gpt-5.6-luna">
+            <option value="gpt-5.6-terra">
+            <option value="gpt-5.6-sol">
+            <option value="deepseek-chat">
+          </datalist>
+          <div class="key-warning" data-i18n="settings.openaiWarning">
+            ℹ️ 部分服务商不允许浏览器直接跨域（CORS）调用其 API——如果遇到"网络请求失败"，通常是这个原因，
+            需要换用允许浏览器直连的服务商，或自建一个允许 CORS 的转发代理。
+          </div>
+        </div>
+
+        <div class="field-group hidden" id="provider-fields-gemini">
+          <label>Google Gemini API Key</label>
+          <div class="field-desc" data-i18n="settings.geminiDesc">
+            可在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 申请。
+          </div>
+          <input type="password" id="gemini-key-input" placeholder="AIza...">
+          <label style="margin-top:14px;" data-i18n="settings.baseUrlLabel">接口地址（Base URL）</label>
+          <input type="text" id="gemini-baseurl-input" placeholder="https://generativelanguage.googleapis.com/v1beta">
+          <label style="margin-top:14px;" data-i18n="settings.modelLabel">模型</label>
+          <input type="text" id="gemini-model-input" list="gemini-model-suggestions" placeholder="gemini-3.5-flash-lite">
+          <datalist id="gemini-model-suggestions">
+            <option value="gemini-3.5-flash-lite">
+            <option value="gemini-3.5-flash">
+            <option value="gemini-3.6-flash">
+            <option value="gemini-3.1-flash-lite">
+            <option value="gemini-2.5-flash">
+            <option value="gemini-2.5-pro">
+          </datalist>
+        </div>
+      </div>
+
+      <div class="settings-tab-panel" data-settings-tab="lang">
+        <div class="field-group">
+          <label data-i18n="settings.uiLangLabel">界面语言</label>
+          <select id="ui-lang-select"></select>
+        </div>
+
+        <div class="field-group">
+          <label data-i18n="settings.sentenceLangLabel">原文分句规则（按语言的缩写词表不同）</label>
+          <div class="field-desc" data-i18n="settings.sentenceLangDesc">决定「Dr.」「Mr.」「z. B.」这类缩写不会被误判成句子结束。选错也不会出大错，只是偶尔切分不够精细。</div>
+          <!-- Ordered by language code, same as the output-language chips and
+               the UI-language menu; the catch-all option stays at the end. -->
+          <div class="radio-row" id="lang-rule-chips">
+            <div class="radio-chip" data-lang="cs">Čeština</div>
+            <div class="radio-chip" data-lang="de">Deutsch</div>
+            <div class="radio-chip" data-lang="en">English</div>
+            <div class="radio-chip" data-lang="es">Español</div>
+            <div class="radio-chip" data-lang="fr">Français</div>
+            <div class="radio-chip" data-lang="it">Italiano</div>
+            <div class="radio-chip" data-lang="la">Latina</div>
+            <div class="radio-chip" data-lang="nl">Nederlands</div>
+            <div class="radio-chip" data-lang="pl">Polski</div>
+            <div class="radio-chip" data-lang="pt">Português</div>
+            <div class="radio-chip" data-lang="tr">Türkçe</div>
+            <div class="radio-chip" data-lang="generic" data-i18n="settings.langGeneric">通用（其他拉丁字母语言）</div>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label data-i18n="settings.outputLangLabel">解析输出语言</label>
+          <div class="field-desc" data-i18n="settings.outputLangDesc">句子结构与词汇讲解会用这个语言输出。选"自定义"可填任意语言名称。</div>
+          <div class="radio-row" id="output-lang-chips">
+            <div class="radio-chip" data-outlang="cs">Čeština</div>
+            <div class="radio-chip" data-outlang="de">Deutsch</div>
+            <div class="radio-chip" data-outlang="en">English</div>
+            <div class="radio-chip" data-outlang="es">Español (España)</div>
+            <div class="radio-chip" data-outlang="fr">Français</div>
+            <div class="radio-chip" data-outlang="it">Italiano</div>
+            <div class="radio-chip" data-outlang="ja">日本語</div>
+            <div class="radio-chip" data-outlang="ko">한국어</div>
+            <div class="radio-chip" data-outlang="pl">Polski</div>
+            <div class="radio-chip" data-outlang="pt-br">Português (Brasil)</div>
+            <div class="radio-chip" data-outlang="ru">Русский</div>
+            <div class="radio-chip" data-outlang="tr">Türkçe</div>
+            <div class="radio-chip" data-outlang="uk">Українська</div>
+            <div class="radio-chip" data-outlang="zh">简体中文</div>
+            <div class="radio-chip" data-outlang="zh-hant">繁體中文</div>
+            <div class="radio-chip" data-outlang="custom" data-i18n="settings.custom">自定义…</div>
+          </div>
+          <input type="text" id="output-lang-custom-input" data-i18n-placeholder="settings.customLangPlaceholder" data-i18n-placeholder="settings.customLangPlaceholder" placeholder="填写目标语言名称，如 Suomi / Tiếng Việt" style="margin-top:8px; display:none;">
+        </div>
+      </div>
+
+      <div class="settings-tab-panel" data-settings-tab="appearance">
+        <div class="field-group">
+          <label data-i18n="settings.themeLabel">主题</label>
+          <div class="radio-row" id="theme-chips">
+            <div class="radio-chip" data-theme="light" data-i18n="settings.themeLight">浅色</div>
+            <div class="radio-chip" data-theme="dark" data-i18n="settings.themeDark">深色</div>
+            <div class="radio-chip" data-theme="sepia" data-i18n="settings.themeSepia">护眼黄</div>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label data-i18n="settings.fontLabel">正文字体与字号</label>
+          <div class="field-row">
+            <select id="font-family-select">
+              <option value="serif" data-i18n="settings.fontSerif">衬线（默认）</option>
+              <option value="sans" data-i18n="settings.fontSans">无衬线</option>
+              <option value="mono" data-i18n="settings.fontMono">等宽</option>
+            </select>
+            <div>
+              <span data-i18n="settings.fontSizeLabel">字号：</span>
+              <input type="range" id="font-size-input" min="14" max="26" step="1" style="width:120px; vertical-align:middle;">
+              <span id="font-size-value">19px</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label data-i18n="settings.paginationLabel">分页方式</label>
+          <div class="radio-row" id="pagination-mode-chips">
+            <div class="radio-chip" data-mode="paragraphs" data-i18n="settings.paginationByParagraph">按段落数分页</div>
+            <div class="radio-chip" data-mode="fit-height" data-i18n="settings.paginationFitHeight">自适应一屏一页</div>
+            <div class="radio-chip" data-mode="none" data-i18n="settings.paginationNone">不分页（长页面）</div>
+          </div>
+          <div class="field-desc" id="paras-per-page-wrap" style="margin-top:10px;">
+            <span data-i18n="settings.parasPerPageLabel">每页段落数：</span>
+            <input type="number" id="paras-per-page-input" min="1" max="50" value="8" style="width:80px; display:inline-block; margin-left:6px;">
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-tab-panel" data-settings-tab="document">
+        <div class="field-group">
+          <label data-i18n="settings.libraryLabel">已保存的文档</label>
+          <div class="field-desc" data-i18n="settings.libraryDesc">切换文档不会重新分词，也不会影响其他文档已缓存的解析结果和阅读进度。</div>
+          <ul class="doc-library-list" id="doc-library-list"></ul>
+          <div class="field-desc" style="margin-top:8px;">
+            <button class="btn hidden" id="btn-restore-example" data-i18n="settings.libraryRestoreExample">恢复内置示例书</button>
+          </div>
+          <div class="field-desc" id="storage-usage" style="margin-top:8px;"></div>
+        </div>
+
+        <div class="field-group">
+          <label data-i18n="settings.chapterLabel">当前章节</label>
+          <div class="field-desc" data-i18n="settings.chapterDesc">内置全书共 12 个章节，切换后自动跳转到该章节第一页。</div>
+          <select id="chapter-select"></select>
+        </div>
+
+        <div class="field-group">
+          <label data-i18n="settings.importLabel">导入文本</label>
+          <div class="field-desc" data-i18n="settings.importDesc">支持 .txt / .docx / .pdf / .epub。每次导入都会作为一个新文档加入上面的列表。</div>
+          <div class="file-drop" id="file-drop-zone">
+            <div data-i18n="settings.importDropHint">点击选择文件，或将 .txt / .docx / .pdf / .epub 拖拽到此处</div>
+            <input type="file" id="file-input" accept=".txt,.docx,.pdf,.epub">
+          </div>
+          <div class="import-status" id="import-status"></div>
+        </div>
+
+        <div class="field-group">
+          <label data-i18n="settings.pasteLabel">或直接粘贴 / 编辑正文</label>
+          <div class="field-desc" data-i18n="settings.pasteDesc">每段之间用一个空行分隔。「另存为新文档」会把它作为一个新文档加入上面的列表，「保存到当前文档」则覆盖当前打开的这一本。</div>
+          <textarea id="raw-text-area" rows="8" data-i18n-placeholder="settings.pastePlaceholder" data-i18n-placeholder="import.pastePlaceholder" placeholder="在此粘贴原文……"></textarea>
+          <div class="field-desc" style="margin-top:8px;">
+            <label style="display:inline-flex; align-items:center; gap:6px; font-weight:normal; cursor:pointer;">
+              <input type="checkbox" id="split-chapters-checkbox" style="width:auto;">
+              <span data-i18n="settings.splitChaptersLabel">尝试识别标题并拆分为多章节（独立成段、不以句末标点结尾的短行会被当作候选标题；效果为尽力而为，可在应用后手动调整）</span>
+            </label>
+          </div>
+          <div class="modal-footer" style="margin-top:10px; flex-wrap:wrap;">
+            <button class="btn" id="btn-load-example" data-i18n="settings.loadExample">载入示例文本</button>
+            <button class="btn" id="btn-apply-text-update" data-i18n="settings.applyTextUpdate">保存到当前文档</button>
+            <button class="btn primary" id="btn-apply-text-new" data-i18n="settings.applyTextNew">另存为新文档</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="modal-footer" style="padding: 0 26px 22px;">
+      <button class="btn" id="btn-clear-cache" data-i18n="settings.clearCache">清空解析缓存</button>
+      <button class="btn primary" id="btn-save-settings" data-i18n="settings.save">保存设置</button>
+    </div>
+  </div>
+</div>

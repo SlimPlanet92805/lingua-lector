@@ -1,0 +1,2295 @@
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.11.0/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
+<!--
+  pdf.js dropped its classic UMD/global build starting with recent releases
+  (cdnjs only ships pdf.min.mjs now, an ES module) -- loaded as an inline
+  module and assigned onto window.pdfjsLib so the rest of the app, which
+  checks window.pdfjsLib, doesn't need to know the difference.
+-->
+<script type="module">
+  import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/pdf.min.mjs";
+  window.pdfjsLib = pdfjsLib;
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/pdf.worker.min.mjs";
+</script>
+<script>
+"use strict";
+
+// ============================================================
+// Default example text: the full book (Elisabeth von Heyking, public
+// domain, 1926), split into chapters.
+// BOOK_CHAPTERS: [{ id, title, dateRange, paragraphs: string[] }, ...]
+// ============================================================
+const BOOK_CHAPTERS = __BOOK_CHAPTERS_PLACEHOLDER__;
+const BOOK_TITLE = "Elisabeth von Heyking · Tagebücher aus vier Weltteilen";
+const DEFAULT_CHAPTER_ID = 'chile_valparaiso';
+
+// ============================================================
+// Settings / state
+// ============================================================
+const SETTINGS_KEY = 'lingua-lector-settings-v1';
+const PROGRESS_KEY_PREFIX = 'lingua-lector-progress-';
+const TEXT_STORAGE_KEY = 'lingua-lector-current-text-v2';
+const CACHE_STORAGE_PREFIX = 'lingua-lector-cache-';
+const CHAPTER_INDEX_KEY_PREFIX = 'lingua-lector-chapter-idx-';
+
+// Which chapter was last open, per document -- this is separate from
+// progressKeyForCurrentText()'s per-chapter *page* number, and separate from
+// saveCurrentDocumentContent()'s saved chapter *content*: neither of those
+// remembers which chapter index was active, so without this a reload always
+// snapped back to the document's default chapter regardless of where the
+// reader actually was.
+function saveCurrentChapterIndex() {
+  try { localStorage.setItem(CHAPTER_INDEX_KEY_PREFIX + currentDocId, String(currentChapterIndex)); } catch (e) { /* ignore */ }
+}
+
+function loadSavedChapterIndex(docId, maxIndex) {
+  try {
+    const raw = localStorage.getItem(CHAPTER_INDEX_KEY_PREFIX + docId);
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 0 && n <= maxIndex) return n;
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+// Multi-provider support: each provider keeps its own key/model/base URL so
+// switching providers doesn't clobber the others' settings.
+const PROVIDER_DEFAULTS = {
+  anthropic: { apiKey: '', model: 'claude-sonnet-5', baseUrl: '' },
+  openai: { apiKey: '', model: 'gpt-5.6-luna', baseUrl: 'https://api.openai.com/v1' },
+  // Gemini default is a Flash-Lite tier because those models have a free quota
+  // on the Gemini API -- important for a BYO-key tool aimed at casual readers.
+  gemini: { apiKey: '', model: 'gemini-3.5-flash-lite', baseUrl: 'https://generativelanguage.googleapis.com/v1beta' },
+};
+
+const DEFAULT_SETTINGS = {
+  provider: 'anthropic', // 'anthropic' | 'openai' | 'gemini'
+  providers: {
+    anthropic: { ...PROVIDER_DEFAULTS.anthropic },
+    openai: { ...PROVIDER_DEFAULTS.openai },
+    gemini: { ...PROVIDER_DEFAULTS.gemini },
+  },
+  sentenceLang: 'de',
+  outputLang: 'zh',
+  customOutputLang: '',
+  paginationMode: 'paragraphs', // 'paragraphs' | 'none'
+  parasPerPage: 8,
+  theme: '', // '' = follow system, or 'light' | 'dark' | 'sepia'
+  fontFamily: 'serif', // 'serif' | 'sans' | 'mono'
+  fontSize: 19,
+  uiLang: '', // '' = auto-detect from navigator.language, else a UI_LANGS code
+};
+
+function currentProviderSettings() {
+  return settings.providers[settings.provider] || PROVIDER_DEFAULTS.anthropic;
+}
+
+let settings = { ...DEFAULT_SETTINGS };
+
+// ============================================================
+// Document library: multiple documents (the built-in book, plus any
+// pasted/imported ones) can be kept in localStorage at once, each with its
+// own chapters, reading progress, and AI-analysis cache -- switching between
+// them doesn't re-parse or evict anything.
+// ============================================================
+const DOC_INDEX_KEY = 'lingua-lector-doc-index-v1';
+const DOC_STORAGE_PREFIX = 'lingua-lector-doc-';
+const CURRENT_DOC_POINTER_KEY = 'lingua-lector-current-doc-v1';
+const BOOK_DOC_ID = 'book:heyking';
+// Placeholder id for "no document at all" (the reader deleted everything,
+// including the built-in example). Never written to the library index or the
+// current-document pointer -- it only exists to give the reading view an empty
+// chapter to render its "import something" state from.
+const EMPTY_DOC_ID = 'doc:empty';
+// The built-in example is a constant baked into the build, not a stored
+// document, so "deleted" can only be remembered as a flag -- without it the
+// first-launch path would put the book back on the very next reload.
+const EXAMPLE_REMOVED_KEY = 'lingua-lector-example-removed-v1';
+
+let currentDocId = BOOK_DOC_ID;
+
+function isExampleRemoved() {
+  try { return localStorage.getItem(EXAMPLE_REMOVED_KEY) === '1'; } catch (e) { return false; }
+}
+
+function setExampleRemoved(removed) {
+  try {
+    if (removed) localStorage.setItem(EXAMPLE_REMOVED_KEY, '1');
+    else localStorage.removeItem(EXAMPLE_REMOVED_KEY);
+  } catch (e) { /* ignore */ }
+}
+
+function docStorageKey(id) {
+  return DOC_STORAGE_PREFIX + id;
+}
+
+function generateDocId() {
+  return 'doc-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+}
+
+function loadDocIndex() {
+  try {
+    const raw = localStorage.getItem(DOC_INDEX_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) { return []; }
+}
+
+function saveDocIndex(index) {
+  try { localStorage.setItem(DOC_INDEX_KEY, JSON.stringify(index)); } catch (e) { /* ignore */ }
+}
+
+function upsertDocIndexEntry(entry) {
+  const index = loadDocIndex();
+  const i = index.findIndex(d => d.id === entry.id);
+  if (i >= 0) index[i] = { ...index[i], ...entry };
+  else index.push(entry);
+  saveDocIndex(index);
+}
+
+// ============================================================
+// Blob storage: document text and analysis caches.
+//
+// Everything else this app persists is tiny -- settings, a pointer, a page
+// number -- and localStorage is the right home for it. These two are not: a
+// 400-page import is over a megabyte of text, and localStorage is capped at
+// about 5 MB per origin (measured on file:// in Chromium: it starts throwing
+// at 4.96 MB). Importing the Satow diaries, 1.07M characters, into a library
+// that already held one book therefore threw QuotaExceededError inside
+// saveCurrentDocumentContent() -- where it was caught and ignored, so the
+// document appeared in the library with its text silently missing and the
+// reader was left looking at the previous book wondering what had happened.
+//
+// IndexedDB has no such cap (navigator.storage reports a ~10 GB quota on the
+// same machine) and, importantly for a file that is meant to be opened by
+// double-clicking it, works on file:// too -- verified in Chromium rather
+// than assumed, because it is widely believed not to.
+//
+// It is asynchronous, and it is not always available: Firefox in private mode
+// throws from open(), and a blocked or hung open() fires NO event at all --
+// not even onerror. That last case is why the probe below times out instead
+// of waiting for an answer that may never come. When IndexedDB can't be had,
+// everything falls back to localStorage and behaves exactly as it did before,
+// except that a quota failure is now reported to the reader rather than
+// swallowed.
+// ============================================================
+const BLOB_DB_NAME = 'lingua-lector';
+const BLOB_DB_STORE = 'blobs';
+const BLOB_OPEN_TIMEOUT_MS = 2500;
+// Keys that live in blob storage. DOC_INDEX_KEY is deliberately NOT one of
+// them even though it starts with DOC_STORAGE_PREFIX: the index has to stay
+// synchronously readable, and it is small.
+function isBlobKey(key) {
+  if (key === DOC_INDEX_KEY) return false;
+  return key.indexOf(DOC_STORAGE_PREFIX) === 0 || key.indexOf(CACHE_STORAGE_PREFIX) === 0;
+}
+
+// Resolves to an IDBDatabase, or to null if IndexedDB is unavailable, refuses
+// to open, or simply never answers. `factory` is passed in rather than read
+// from the global so the timeout path is testable.
+function openIdbWithTimeout(factory, timeoutMs) {
+  return new Promise(resolve => {
+    if (!factory) { resolve(null); return; }
+    let settled = false;
+    let timer = null;
+    const done = (db) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      resolve(db);
+    };
+    timer = setTimeout(() => done(null), timeoutMs);
+    try {
+      const req = factory.open(BLOB_DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(BLOB_DB_STORE)) db.createObjectStore(BLOB_DB_STORE);
+      };
+      req.onsuccess = () => done(req.result);
+      req.onerror = () => done(null);
+      req.onblocked = () => done(null);
+    } catch (e) {
+      done(null);
+    }
+  });
+}
+
+const localStorageBlobBackend = {
+  name: 'localStorage',
+  // Deliberately no try/catch on set(): a failed write is exactly the thing
+  // that used to disappear here, and the caller needs to see it.
+  get: (key) => Promise.resolve(localStorage.getItem(key)),
+  set: (key, value) => { localStorage.setItem(key, value); return Promise.resolve(); },
+  remove: (key) => { localStorage.removeItem(key); return Promise.resolve(); },
+  keys: (prefix) => {
+    const out = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.indexOf(prefix) === 0 && isBlobKey(k)) out.push(k);
+    }
+    return Promise.resolve(out);
+  },
+};
+
+function idbBlobBackend(db) {
+  // Resolve on transaction *complete*, not on request success: a write whose
+  // request succeeded but whose transaction then aborted (quota) must reject.
+  function tx(mode, fn) {
+    return new Promise((resolve, reject) => {
+      let t;
+      try { t = db.transaction(BLOB_DB_STORE, mode); }
+      catch (e) { reject(e); return; }
+      let result;
+      const req = fn(t.objectStore(BLOB_DB_STORE));
+      if (req) req.onsuccess = () => { result = req.result; };
+      t.oncomplete = () => resolve(result);
+      t.onerror = () => reject(t.error || new Error('IndexedDB transaction failed'));
+      t.onabort = () => reject(t.error || new Error('IndexedDB transaction aborted'));
+    });
+  }
+  return {
+    name: 'indexedDB',
+    get: (key) => tx('readonly', s => s.get(key)).then(v => (v === undefined ? null : v)),
+    set: (key, value) => tx('readwrite', s => s.put(value, key)).then(() => undefined),
+    remove: (key) => tx('readwrite', s => s.delete(key)).then(() => undefined),
+    keys: (prefix) => tx('readonly', s => s.getAllKeys())
+      .then(ks => (ks || []).filter(k => typeof k === 'string' && k.indexOf(prefix) === 0)),
+  };
+}
+
+let blobBackend = localStorageBlobBackend;
+let blobStoreReady = null;
+
+// Moves anything already sitting in localStorage under the blob prefixes into
+// IndexedDB, then deletes the localStorage copy -- which is the point: a
+// library built up before this change is what is filling those 5 MB.
+// A key that fails to copy keeps its localStorage original.
+async function migrateBlobsToIdb(backend) {
+  let keys = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && isBlobKey(k)) keys.push(k);
+    }
+  } catch (e) { return; }
+  for (const key of keys) {
+    try {
+      const value = localStorage.getItem(key);
+      if (value === null) continue;
+      await backend.set(key, value);
+      localStorage.removeItem(key);
+    } catch (e) { /* leave this one where it is */ }
+  }
+}
+
+function initBlobStore() {
+  if (blobStoreReady) return blobStoreReady;
+  blobStoreReady = (async () => {
+    const factory = (typeof indexedDB !== 'undefined' && indexedDB) ? indexedDB : null;
+    const db = await openIdbWithTimeout(factory, BLOB_OPEN_TIMEOUT_MS);
+    if (!db) return blobBackend; // localStorage, as before
+    blobBackend = idbBlobBackend(db);
+    await migrateBlobsToIdb(blobBackend);
+    return blobBackend;
+  })();
+  return blobStoreReady;
+}
+
+function blobGet(key) { return initBlobStore().then(b => b.get(key)); }
+function blobSet(key, value) { return initBlobStore().then(b => b.set(key, value)); }
+function blobRemove(key) { return initBlobStore().then(b => b.remove(key)); }
+function blobKeys(prefix) { return initBlobStore().then(b => b.keys(prefix)); }
+
+// Total bytes held in blob storage, plus what backend is actually in use --
+// the "how much room is left" question localStorage gives no way to answer.
+// Sizes are UTF-16 code units, which is how browsers charge for localStorage.
+async function blobUsage() {
+  const backend = await initBlobStore();
+  let bytes = 0;
+  for (const prefix of [DOC_STORAGE_PREFIX, CACHE_STORAGE_PREFIX]) {
+    let keys = [];
+    try { keys = await backend.keys(prefix); } catch (e) { continue; }
+    for (const k of keys) {
+      try {
+        const v = await backend.get(k);
+        if (typeof v === 'string') bytes += v.length * 2;
+      } catch (e) { /* skip */ }
+    }
+  }
+  return { backend: backend.name, bytes, limit: backend.name === 'localStorage' ? 5 * 1024 * 1024 : null };
+}
+
+async function documentStoredSize(id) {
+  try {
+    const raw = await blobGet(docStorageKey(id));
+    return typeof raw === 'string' ? raw.length * 2 : 0;
+  } catch (e) { return 0; }
+}
+
+function formatBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function isQuotaError(err) {
+  if (!err) return false;
+  return err.name === 'QuotaExceededError' ||
+    err.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+    /quota/i.test(err.message || '');
+}
+
+// A storage write that fails has to be visible. This is the whole reason the
+// Satow import looked like a no-op: the throw was caught and dropped, the
+// reader got a success message, and the text was gone.
+function reportStorageError(err) {
+  console.error(err);
+  const msg = isQuotaError(err)
+    ? t('storage.full', { backend: blobBackend.name })
+    : t('storage.writeFailed', { msg: (err && err.message) || String(err) });
+  try { setImportStatus(msg, 'error'); } catch (e) { /* settings panel not built yet */ }
+}
+
+async function loadDocumentContent(id) {
+  try {
+    const raw = await blobGet(docStorageKey(id));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
+// The currently loaded work: either the built-in book's chapters, or a
+// single synthetic chapter holding pasted/imported custom text.
+let bookTitle = BOOK_TITLE;
+let chapters = [];
+let currentChapterIndex = 0;
+
+function currentChapter() {
+  return chapters[currentChapterIndex] || { id: 'custom', title: '', dateRange: '', paragraphs: [] };
+}
+
+// PARAGRAPHS always mirrors chapters[currentChapterIndex].paragraphs; kept as
+// a separate binding because the rest of the app reads/writes it directly.
+let PARAGRAPHS = [];
+let chapterTitle = "";
+let chapterDates = "";
+
+function syncFromCurrentChapter() {
+  const ch = currentChapter();
+  PARAGRAPHS = ch.paragraphs;
+  chapterTitle = ch.title;
+  chapterDates = ch.dateRange;
+}
+
+function loadDefaultBook() {
+  chapters = BOOK_CHAPTERS.map(c => ({ ...c, paragraphs: c.paragraphs.slice() }));
+  bookTitle = BOOK_TITLE;
+  currentChapterIndex = Math.max(0, chapters.findIndex(c => c.id === DEFAULT_CHAPTER_ID));
+  syncFromCurrentChapter();
+}
+
+function loadSettingsFromLocalStorage() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      settings = { ...DEFAULT_SETTINGS, ...parsed };
+      // deep-merge providers so a saved settings blob missing a provider
+      // (e.g. saved before openai/gemini existed) still gets sane defaults
+      settings.providers = {
+        anthropic: { ...PROVIDER_DEFAULTS.anthropic, ...(parsed.providers && parsed.providers.anthropic) },
+        openai: { ...PROVIDER_DEFAULTS.openai, ...(parsed.providers && parsed.providers.openai) },
+        gemini: { ...PROVIDER_DEFAULTS.gemini, ...(parsed.providers && parsed.providers.gemini) },
+      };
+      // migrate pre-multi-provider settings (flat apiKey/model, Anthropic-only)
+      if (parsed.apiKey && !settings.providers.anthropic.apiKey) {
+        settings.providers.anthropic.apiKey = parsed.apiKey;
+      }
+      if (parsed.model && !parsed.providers) {
+        settings.providers.anthropic.model = parsed.model;
+      }
+    }
+  } catch (e) { /* ignore corrupt storage */ }
+}
+
+function saveSettingsToLocalStorage() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch (e) { /* storage may be unavailable (private browsing, quota) */ }
+}
+
+// Resolves true when the document's text is actually on disk. The index entry
+// is written only after that succeeds: a library row pointing at text that was
+// never stored is worse than no row at all -- opening it later finds nothing
+// and silently leaves the previous document on screen.
+async function saveCurrentDocumentContent() {
+  if (currentDocId === EMPTY_DOC_ID) return true; // placeholder: nothing to persist
+  try {
+    await blobSet(docStorageKey(currentDocId), JSON.stringify({ bookTitle, chapters }));
+  } catch (e) {
+    reportStorageError(e);
+    return false;
+  }
+  upsertDocIndexEntry({
+    id: currentDocId,
+    title: bookTitle,
+    chapterCount: chapters.length,
+    savedAt: Date.now(),
+    builtin: currentDocId === BOOK_DOC_ID,
+  });
+  try { localStorage.setItem(CURRENT_DOC_POINTER_KEY, currentDocId); } catch (e) { /* ignore */ }
+  return true;
+}
+
+// kept as an alias: existing call sites (title-field edits, chapter renames)
+// just want "persist whatever changed about the current document"
+function saveTextToLocalStorage() {
+  return saveCurrentDocumentContent();
+}
+
+async function loadTextFromLocalStorage() {
+  try {
+    const pointer = localStorage.getItem(CURRENT_DOC_POINTER_KEY);
+    if (pointer) {
+      if (pointer === BOOK_DOC_ID && !isExampleRemoved()) {
+        loadDefaultBook();
+        currentDocId = BOOK_DOC_ID;
+        const savedIdx = loadSavedChapterIndex(BOOK_DOC_ID, chapters.length - 1);
+        if (savedIdx !== null) { currentChapterIndex = savedIdx; syncFromCurrentChapter(); }
+        return true;
+      }
+      const content = await loadDocumentContent(pointer);
+      if (content && Array.isArray(content.chapters) && content.chapters.length) {
+        chapters = content.chapters;
+        bookTitle = content.bookTitle || bookTitle;
+        currentDocId = pointer;
+        currentChapterIndex = loadSavedChapterIndex(pointer, chapters.length - 1) || 0;
+        syncFromCurrentChapter();
+        return true;
+      }
+    }
+
+    // migrate from v2 (single "current text" blob, pre-document-library)
+    const v2Raw = localStorage.getItem(TEXT_STORAGE_KEY);
+    if (v2Raw) {
+      const parsed = JSON.parse(v2Raw);
+      if (Array.isArray(parsed.chapters) && parsed.chapters.length) {
+        const looksLikeBook = parsed.chapters.length === BOOK_CHAPTERS.length &&
+          parsed.chapters.every((c, i) => c.id === BOOK_CHAPTERS[i].id);
+        if (looksLikeBook) {
+          loadDefaultBook();
+          currentDocId = BOOK_DOC_ID;
+        } else {
+          chapters = parsed.chapters;
+          bookTitle = parsed.bookTitle || bookTitle;
+          currentDocId = generateDocId();
+          currentChapterIndex = 0;
+          syncFromCurrentChapter();
+        }
+        await saveCurrentDocumentContent();
+        localStorage.removeItem(TEXT_STORAGE_KEY);
+        return true;
+      }
+    }
+
+    // migrate from v1 (older single flat-array) format, if present
+    const legacyRaw = localStorage.getItem('lingua-lector-current-text-v1');
+    if (legacyRaw) {
+      const legacy = JSON.parse(legacyRaw);
+      if (Array.isArray(legacy.paragraphs) && legacy.paragraphs.length) {
+        // v1 only ever held a single chapter (the old Chile-only default, or
+        // a user's pasted/imported text). If it's byte-for-byte the old
+        // shipped default, it's not real user customization — load the full
+        // multi-chapter book instead of silently downgrading to one chapter.
+        const defaultChile = BOOK_CHAPTERS.find(c => c.id === 'chile_valparaiso');
+        const looksLikeOldDefault = defaultChile &&
+          JSON.stringify(legacy.paragraphs) === JSON.stringify(defaultChile.paragraphs);
+
+        localStorage.removeItem('lingua-lector-current-text-v1');
+        if (looksLikeOldDefault) {
+          return false; // fall through to loadDefaultBook() in init()
+        }
+
+        chapters = [{
+          id: 'custom',
+          title: legacy.chapterTitle || '',
+          dateRange: legacy.chapterDates || '',
+          paragraphs: legacy.paragraphs,
+        }];
+        bookTitle = legacy.bookTitle || bookTitle;
+        currentDocId = generateDocId();
+        currentChapterIndex = 0;
+        syncFromCurrentChapter();
+        await saveCurrentDocumentContent();
+        return true;
+      }
+    }
+  } catch (e) { /* ignore corrupt storage */ }
+  return false;
+}
+
+// What init() loads: last-open document if there is one, otherwise the first
+// document still available. Falling straight back to the built-in example here
+// would resurrect it right after the reader deleted it, which is why this goes
+// through availableDocumentIds() instead of calling loadDefaultBook() blindly.
+async function loadInitialDocument() {
+  if (await loadTextFromLocalStorage()) return;
+  const next = availableDocumentIds()[0];
+  if (next === BOOK_DOC_ID) {
+    loadDefaultBook();
+    currentDocId = BOOK_DOC_ID;
+    return;
+  }
+  const content = next ? await loadDocumentContent(next) : null;
+  if (content && Array.isArray(content.chapters) && content.chapters.length) {
+    chapters = content.chapters;
+    bookTitle = content.bookTitle || bookTitle;
+    currentDocId = next;
+    currentChapterIndex = loadSavedChapterIndex(next, chapters.length - 1) || 0;
+    syncFromCurrentChapter();
+    return;
+  }
+  loadEmptyDocument();
+}
+
+// Switches the active document. Each document's chapters, reading progress,
+// and analysis cache are independent -- switching never re-parses or evicts
+// another document's data.
+async function switchToDocument(id) {
+  if (id === currentDocId) return;
+  if (id === BOOK_DOC_ID) {
+    loadDefaultBook();
+    currentDocId = BOOK_DOC_ID;
+    const savedIdx = loadSavedChapterIndex(BOOK_DOC_ID, chapters.length - 1);
+    if (savedIdx !== null) { currentChapterIndex = savedIdx; syncFromCurrentChapter(); }
+  } else {
+    const content = await loadDocumentContent(id);
+    if (!content) return;
+    chapters = content.chapters;
+    bookTitle = content.bookTitle || BOOK_TITLE;
+    currentDocId = id;
+    currentChapterIndex = loadSavedChapterIndex(id, chapters.length - 1) || 0;
+    syncFromCurrentChapter();
+  }
+  await saveCurrentDocumentContent();
+  rebuildParagraphSentences();
+  renderPage(0);
+  renderTocList();
+  populateChapterSelect();
+  renderDocLibraryList();
+  syncTitleFieldsFromState();
+}
+
+// Documents that can be opened right now: everything in the stored index, plus
+// the built-in example unless the reader deleted it.
+function availableDocumentIds() {
+  const stored = loadDocIndex().map(d => d.id).filter(id => id !== BOOK_DOC_ID);
+  return (isExampleRemoved() ? [] : [BOOK_DOC_ID]).concat(stored);
+}
+
+// Nothing loaded at all -- every document, including the built-in example, has
+// been deleted. Renders the reader's "import something" empty state.
+function loadEmptyDocument() {
+  chapters = [{ id: 'empty', title: '', dateRange: '', paragraphs: [] }];
+  bookTitle = '';
+  currentDocId = EMPTY_DOC_ID;
+  currentChapterIndex = 0;
+  syncFromCurrentChapter();
+  try { localStorage.removeItem(CURRENT_DOC_POINTER_KEY); } catch (e) { /* ignore */ }
+}
+
+// Deleting the built-in example is allowed (it can always be brought back from
+// the document tab, since its text is embedded in the build itself); what gets
+// removed is only the library entry, its cache and its reading position.
+async function deleteDocumentFromLibrary(id) {
+  try { await blobRemove(docStorageKey(id)); } catch (e) { /* ignore */ }
+  try { localStorage.removeItem(CHAPTER_INDEX_KEY_PREFIX + id); } catch (e) { /* ignore */ }
+  await clearDocumentCache(id);
+  saveDocIndex(loadDocIndex().filter(d => d.id !== id));
+  if (id === BOOK_DOC_ID) setExampleRemoved(true);
+
+  if (currentDocId === id) {
+    const next = availableDocumentIds()[0];
+    if (next) {
+      await switchToDocument(next);
+    } else {
+      loadEmptyDocument();
+      rebuildParagraphSentences();
+      renderPage(0);
+      renderTocList();
+      populateChapterSelect();
+      renderDocLibraryList();
+      syncTitleFieldsFromState();
+    }
+  } else {
+    renderDocLibraryList();
+  }
+}
+
+// storage key for reading-progress persistence, derived from the current text
+// so different loaded texts don't clobber each other's saved page
+function progressKeyForCurrentText() {
+  // cheap hash of the first ~200 chars of paragraph 0, plus paragraph count
+  const sample = (PARAGRAPHS[0] || '').slice(0, 200) + '|' + PARAGRAPHS.length;
+  let hash = 0;
+  for (let i = 0; i < sample.length; i++) {
+    hash = ((hash << 5) - hash + sample.charCodeAt(i)) | 0;
+  }
+  return PROGRESS_KEY_PREFIX + hash;
+}
+
+// ============================================================
+// Multi-language abbreviation tables for sentence splitting
+// ============================================================
+const ABBREV_TABLES = {
+  de: [
+    "z.b","d.h","u.a","u.s.w","usw","bzw","ca","etc","vgl","ggf","evtl",
+    "dr","mme","mr","mrs","frl","hr","fr","prof","st","nr","bd","hrsg",
+    "geb","gest","reg","kgl","kais","württ","württemb","sog","co","inc","ltd","al",
+    "frhr","freih","exz","majest","kgl.hoh","durchl","hoheit","gen","rat","reg.rat",
+    "vortr","ausw","stellvertr","stellv","verh","verw","ehem","bzgl","einschl","inkl",
+    "jr","sen"
+  ],
+  en: [
+    "mr","mrs","ms","dr","prof","st","jr","sr","vs","etc","e.g","i.e",
+    "co","inc","ltd","corp","gov","dept","approx","al","ca","fig","no","vol","pp"
+  ],
+  fr: [
+    "m","mme","mlle","dr","prof","st","cf","etc","ex","vol","no",
+    "co","inc","ltd","ca","av","apr","boul","av.j.-c","ap.j.-c"
+  ],
+  es: [
+    "sr","sra","srta","dr","dra","prof","st","etc","cf","vol","no",
+    "co","inc","ltd","ud","uds","a.c","d.c"
+  ],
+  it: [
+    "sig","sig.ra","dott","prof","st","etc","cfr","vol","no",
+    "co","inc","ltd","ecc","art","cap"
+  ],
+  pt: [
+    "sr","sra","srta","dr","dra","prof","st","etc","cf","vol","no",
+    "co","inc","ltd","av","a.c","d.c"
+  ],
+  nl: [
+    "dhr","mevr","mej","dr","prof","st","bijv","enz","d.w.z","nr","blz",
+    "co","inc","ltd","jl","z.g","t.a.v"
+  ],
+  la: [
+    "cf","etc","st","vol","no","ca","al","i.e","e.g","c","d.c","a.d",
+    "co","inc","ltd"
+  ],
+  cs: [
+    "tj","tzv","atd","apod","př","str","č","mgr","dr","ing","prof",
+    "co","inc","ltd","sv","st"
+  ],
+  pl: [
+    "tj","tzn","itd","itp","dr","prof","mgr","inż","św","ul","nr",
+    "co","inc","ltd","str","al"
+  ],
+  tr: [
+    "dr","prof","sn","sy","vb","vs","örn","bkz","no","cad","sok",
+    "co","inc","ltd"
+  ],
+  generic: [
+    "mr","mrs","ms","dr","prof","st","etc","co","inc","ltd","vol","no","al","ca"
+  ],
+};
+
+function buildAbbrevSet(langCode) {
+  const list = ABBREV_TABLES[langCode] || ABBREV_TABLES.generic;
+  return new Set(list.map(s => s.toLowerCase()));
+}
+
+// ============================================================
+// Sentence splitter (language-parameterized)
+//
+// Produces two parallel views of a paragraph:
+//
+//   segments -- what gets RENDERED, in reading order. They tile the paragraph
+//               exactly: concatenating every segment's text reproduces the
+//               input character for character.
+//   units    -- what gets ANALYSED. A unit is one clickable sentence and may
+//               own SEVERAL, NON-ADJACENT segments.
+//
+// The two differ because of footnotes. In
+//
+//     A [Fußnote: F1. F2.] B.
+//
+// the footnote interrupts the sentence "A B." A reader clicking the main text
+// wants that sentence *without* the footnote, while the footnote's own
+// sentences should still be clickable in their own right. So:
+//
+//   segments: "A "  "[Fußnote: F1. "  "F2.]"  " B."
+//   uid:       0     1                 2       0
+//   units:     0 -> "A B."   1 -> "Fußnote: F1."   2 -> "F2."
+//
+// A bracket counts as a footnote only when its contents contain at least one
+// complete sentence. Short glosses ("[Gartenvorstadt]", "[deutscher
+// Ministerresident in Chile]") have no sentence-ending punctuation, so they
+// stay inline as part of the sentence carrying them -- which is what a reader
+// expects, since they are grammatically part of it.
+//
+// Handles besides that: abbreviations from the selected table, literal "..."
+// and "…" ellipses, repeated "!!"/"??", guillemets and other quote marks,
+// numeric ordinals ("15." as a date).
+// ============================================================
+
+// Trailing sentence-ending punctuation, allowing closing quotes/brackets after it.
+const SENTENCE_END_RE = /[.!?…][»«"“”‹›'’)\]]*\s*$/;
+
+// Core scanner. Takes an array of code points and returns index ranges that
+// TILE it exactly -- every character lands in exactly one range, in order.
+// Working in ranges rather than strings is what lets the layer above map one
+// sentence onto several disjoint stretches of the original paragraph.
+function scanSentenceRanges(chars, ABBREV) {
+  const ranges = [];
+  let i = 0;
+  let tokenStart = 0;
+
+  const cur = () => chars.slice(tokenStart, i).join('');
+
+  function closeToken() {
+    // absorb the spaces separating this sentence from the next so the ranges
+    // leave no gaps
+    let e = i;
+    while (e < chars.length && chars[e] === ' ') e++;
+    if (e > tokenStart) ranges.push({ start: tokenStart, end: e });
+    tokenStart = e;
+    i = e;
+  }
+
+  while (i < chars.length) {
+    const c = chars[i];
+
+    // Any bracket reaching the scanner is an inline gloss -- footnotes were
+    // lifted out before this ran. Punctuation inside a gloss belongs to the
+    // gloss, so consume the whole balanced span without considering a split.
+    if (c === '[') {
+      let d = 0;
+      while (i < chars.length) {
+        if (chars[i] === '[') d++;
+        else if (chars[i] === ']') d--;
+        i++;
+        if (d === 0) break;
+      }
+      continue;
+    }
+
+    // Ellipsis, in either spelling: the literal three-or-more dots or the
+    // single U+2026 glyph. Both behave identically -- an ellipsis ends a
+    // sentence only when what follows actually starts one.
+    if ((c === '.' && chars[i + 1] === '.' && chars[i + 2] === '.') || c === '…') {
+      if (c === '…') i++;
+      else while (chars[i] === '.') i++;
+      let j = i;
+      while (j < chars.length && chars[j] === ' ') j++;
+      if (/[A-ZÀ-ÖØ-Þ]/.test(chars[j] || '')) closeToken();
+      continue;
+    }
+
+    if (c === '.' || c === '!' || c === '?') {
+      const trimmed = cur().replace(/[»«"“”‹›'’]+$/, '');
+      const wordMatch = trimmed.match(/([A-Za-zÀ-ÖØ-öø-ÿ]+)\.?$/);
+      let isAbbrev = false;
+
+      // numeric ordinal like "15." or "5." (dates, list numbers) -> not an end
+      if (c === '.' && /(\d+)\s*$/.test(trimmed)) isAbbrev = true;
+
+      if (!isAbbrev && wordMatch) {
+        const w = wordMatch[1].toLowerCase();
+        if (ABBREV.has(w)) isAbbrev = true;
+        if (wordMatch[1].length === 1) isAbbrev = true; // initials: "T.", "G.", "z."...
+      }
+
+      let j = i + 1;
+      while (j < chars.length && chars[j] === ' ') j++;
+      // look past a closing bracket and any closing quote before judging what
+      // follows: in »...gebt uns zu essen!«, was sich... it is the comma, not
+      // the guillemet, that settles whether the sentence really ended
+      while (chars[j] === ']') {
+        j++;
+        while (j < chars.length && chars[j] === ' ') j++;
+      }
+      while (j < chars.length && /[»«"“”‹›'’)]/.test(chars[j])) {
+        j++;
+        while (j < chars.length && chars[j] === ' ') j++;
+      }
+      const nextChar = chars[j] || '';
+      const nextIsLower = /[a-zà-öø-ÿ]/.test(nextChar);
+      const nextContinuesClause = /[,;:]/.test(nextChar); // clause carries on
+
+      if ((c === '.' && isAbbrev) || nextIsLower || nextContinuesClause) {
+        i++;
+        continue;
+      }
+
+      i++;
+      while (i < chars.length && /[.!?]/.test(chars[i])) i++;
+      // a closing quote or bracket right after the punctuation belongs to this
+      // sentence, not the next one
+      while (i < chars.length && /[»«"“”‹›'’)\]]/.test(chars[i])) i++;
+      closeToken();
+      continue;
+    }
+
+    i++;
+  }
+  if (chars.length > tokenStart) ranges.push({ start: tokenStart, end: chars.length });
+
+  // Merge stray tiny non-alphanumeric fragments (a lone trailing dash, say)
+  // into the previous sentence rather than showing them as their own unit.
+  const merged = [];
+  for (const r of ranges) {
+    const text = chars.slice(r.start, r.end).join('').trim();
+    const isTinyFragment = text.length <= 2 && !/[A-Za-zÀ-ÖØ-öø-ÿ0-9]/.test(text);
+    if (isTinyFragment && merged.length) merged[merged.length - 1].end = r.end;
+    else merged.push({ start: r.start, end: r.end });
+  }
+  return merged;
+}
+
+// Top-level balanced [...] spans as {start, end} over `chars` (end exclusive,
+// brackets included). Unbalanced brackets are ignored and stay literal text.
+function topLevelBracketSpans(chars) {
+  const spans = [];
+  let depth = 0;
+  let openedAt = -1;
+  for (let k = 0; k < chars.length; k++) {
+    if (chars[k] === '[') {
+      if (depth === 0) openedAt = k;
+      depth++;
+    } else if (chars[k] === ']' && depth > 0) {
+      depth--;
+      if (depth === 0 && openedAt >= 0) {
+        spans.push({ start: openedAt, end: k + 1 });
+        openedAt = -1;
+      }
+    }
+  }
+  return spans;
+}
+
+function splitIntoSentenceUnits(paragraph, langCode) {
+  const ABBREV = buildAbbrevSet(langCode || settings.sentenceLang);
+  const chars = Array.from(paragraph);
+
+  // 1. Which bracket spans are footnotes (contain a complete sentence) rather
+  //    than inline glosses?
+  // The test is that the contents END with sentence-ending punctuation, which
+  // is a stricter reading of "contains a complete sentence" -- and a
+  // deliberately more robust one. Testing whether ANY sentence inside looks
+  // complete makes the decision hostage to the abbreviation table: an
+  // unlisted abbreviation mid-gloss reads as a sentence end and the gloss gets
+  // torn out of its sentence. "[wo sie wohnten, als Heyking 1885 stellvertr.
+  // Generalkonsul in New York war]" is a relative clause, not a footnote, but
+  // "stellvertr." made it look like one. Requiring the closing punctuation
+  // removes that whole failure class structurally rather than by chasing
+  // abbreviations across twelve languages, and the two failure modes are not
+  // symmetric: wrongly keeping a footnote inline is untidy, wrongly lifting a
+  // gloss silently mutilates the sentence a reader is trying to study.
+  const footnotes = topLevelBracketSpans(chars).filter(sp =>
+    SENTENCE_END_RE.test(chars.slice(sp.start + 1, sp.end - 1).join('')));
+
+  const isFootnoteChar = new Array(chars.length).fill(false);
+  footnotes.forEach(sp => {
+    for (let k = sp.start; k < sp.end; k++) isFootnoteChar[k] = true;
+  });
+
+  const units = [];
+  const segments = [];
+  const addUnit = (kind) => {
+    const u = { uid: units.length, text: '', kind };
+    units.push(u);
+    return u;
+  };
+
+  // 2. The main text is the paragraph with footnotes lifted out. Scanning it
+  //    in its own coordinate space and mapping the ranges back gives each main
+  //    sentence the (possibly disjoint) stretches it really occupies.
+  const mainIdx = [];
+  for (let k = 0; k < chars.length; k++) if (!isFootnoteChar[k]) mainIdx.push(k);
+  const mainChars = mainIdx.map(k => chars[k]);
+
+  for (const r of scanSentenceRanges(mainChars, ABBREV)) {
+    const unit = addUnit('main');
+    // group this sentence's original indices into contiguous runs; each run
+    // becomes one rendered segment
+    let runStart = null;
+    let prev = null;
+    const emit = (a, b) => segments.push({ uid: unit.uid, start: a, end: b + 1 });
+    for (let m = r.start; m < r.end; m++) {
+      const o = mainIdx[m];
+      if (runStart === null) { runStart = o; prev = o; continue; }
+      if (o === prev + 1) { prev = o; continue; }
+      emit(runStart, prev);
+      runStart = o; prev = o;
+    }
+    if (runStart !== null) emit(runStart, prev);
+  }
+
+  // 3. Each footnote's interior is split normally and its sentences become
+  //    units of their own. The brackets are rendered with the first and last of
+  //    those sentences so the paragraph still reads as written, but they are
+  //    left out of the analysed text.
+  for (const sp of footnotes) {
+    const inner = chars.slice(sp.start + 1, sp.end - 1);
+    const innerRanges = scanSentenceRanges(inner, ABBREV);
+    if (!innerRanges.length) {
+      const unit = addUnit('footnote');
+      segments.push({ uid: unit.uid, start: sp.start, end: sp.end });
+      continue;
+    }
+    innerRanges.forEach((r, n) => {
+      const unit = addUnit('footnote');
+      const first = n === 0;
+      const last = n === innerRanges.length - 1;
+      segments.push({
+        uid: unit.uid,
+        start: first ? sp.start : sp.start + 1 + r.start,
+        end: last ? sp.end : sp.start + 1 + r.end,
+      });
+    });
+  }
+
+  // 4. Reading order, then each unit's analysis text.
+  segments.sort((a, b) => a.start - b.start);
+  segments.forEach(seg => { seg.text = chars.slice(seg.start, seg.end).join(''); });
+
+  const parts = new Map();
+  segments.forEach(seg => {
+    if (!parts.has(seg.uid)) parts.set(seg.uid, []);
+    parts.get(seg.uid).push(seg.text);
+  });
+  units.forEach(u => {
+    let text = (parts.get(u.uid) || []).join(' ');
+    // a footnote unit carries the brackets for rendering but is analysed without them
+    if (u.kind === 'footnote') text = text.replace(/^\[/, '').replace(/\]$/, '');
+    u.text = text.replace(/\s+/g, ' ').trim();
+  });
+
+  // A unit whose segments were pure whitespace has nothing to analyse; drop it
+  // and give its segments to the previous surviving unit so the text still tiles.
+  const kept = [];
+  const remap = new Map();
+  for (const u of units) {
+    if (u.text) { remap.set(u.uid, u.uid); kept.push(u); }
+    else if (kept.length) remap.set(u.uid, kept[kept.length - 1].uid);
+    else remap.set(u.uid, null);
+  }
+  const outSegments = [];
+  for (const seg of segments) {
+    const uid = remap.get(seg.uid);
+    if (uid === null || uid === undefined) {
+      // leading whitespace with no owner yet -- hand it to whatever comes first
+      outSegments.push({ uid: null, text: seg.text });
+      continue;
+    }
+    const last = outSegments[outSegments.length - 1];
+    if (last && last.uid === uid) last.text += seg.text; // re-merge adjacent runs
+    else outSegments.push({ uid, text: seg.text });
+  }
+  for (const seg of outSegments) {
+    if (seg.uid !== null) continue;
+    const owner = outSegments.find(s => s.uid !== null);
+    if (owner) { owner.text = seg.text + owner.text; seg.text = ''; }
+  }
+
+  // Fold whitespace-only segments into a neighbour. They arise at the edges of
+  // a paragraph and in the gap a lifted-out footnote leaves behind. Keeping
+  // them would put an invisible clickable sliver between two sentences, and
+  // since whitespace has nothing to analyse it does not matter which unit ends
+  // up owning it -- only that the text still tiles.
+  const final = [];
+  for (const seg of outSegments) {
+    if (!seg.text) continue;
+    if (!seg.text.trim() && final.length) {
+      final[final.length - 1].text += seg.text;
+      continue;
+    }
+    final.push(seg);
+  }
+  while (final.length > 1 && !final[0].text.trim()) {
+    final[1].text = final[0].text + final[1].text;
+    final.shift();
+  }
+
+  // A paragraph with no analysable text at all (pure whitespace) yields
+  // nothing to render and nothing to click -- units and segments are both
+  // empty, and there is no sentence for the stray whitespace to belong to.
+  if (!kept.length) return { units: [], segments: [] };
+  return { units: kept, segments: final.filter(s => s.uid !== null) };
+}
+
+// Thin wrapper: just the analysable sentence texts, for callers that do not
+// care where those sentences physically sit in the paragraph.
+function splitIntoSentences(paragraph, langCode) {
+  return splitIntoSentenceUnits(paragraph, langCode).units.map(u => u.text);
+}
+
+// ============================================================
+// i18n: UI chrome translations
+// (This covers stable, non-redesigned UI. AI-facing prompts are separate
+// and always instruct the model in the user's chosen *output* language,
+// independent of this UI language.)
+// ============================================================
+// Ordered by BCP-47 code, like the sentence-rule and output-language lists in
+// the settings panel. The three used to each have their own order (roughly:
+// whatever order they were added in), so the same languages appeared in three
+// different sequences on one screen. Sorting by code is the only rule of the
+// three that works here: these are labelled with endonyms, so alphabetising
+// the visible labels would need a collation per script, and "most useful
+// first" is a different answer for every reader.
+const UI_LANGS = ['de', 'en', 'es', 'fr', 'it', 'ja', 'ru', 'zh', 'zh-hant'];
+const UI_LANG_NAMES = {
+  de: 'Deutsch', en: 'English', es: 'Español', fr: 'Français', it: 'Italiano',
+  ja: '日本語', ru: 'Русский', zh: '简体中文', 'zh-hant': '繁體中文',
+};
+
+const I18N = {
+  zh: {
+    'toolbar.hideSidebar': '隐藏侧栏',
+    'toolbar.showSidebar': '显示侧栏',
+    'toolbar.toc': '📖 目录',
+    'toolbar.prevPage': '← 上一页',
+    'toolbar.nextPage': '下一页 →',
+    'toolbar.pagerStatus': '第 {page} / {total} 页',
+    'toolbar.pagerPrefix': '第 ',
+    'toolbar.pagerSuffix': ' 页',
+    'toolbar.openSettings': '⚙ 设置',
+    'toolbar.hint': '点击任意句子查看语法与词汇解析 · 快捷键 ← → 翻页 · Esc 关闭',
+    'panel.title': '句子解析',
+    'panel.closeTitle': '收起侧栏',
+    'panel.emptyMsg': '点击左侧正文中的任意一句，<br>这里会显示句子结构拆解和词汇讲解。',
+    'panel.loading': '正在解析这句话…',
+    'panel.retry': '重试',
+    'panel.reanalyze': '重新解析这句话（跳过缓存）',
+    'cache.cleared': '已清空当前文档所有章节的解析缓存（不影响其他文档、已保存的设置和文本）。',
+    'cache.clearedDoc': '已清除《{title}》的解析缓存。',
+    'storage.usage': '文档与缓存已占用 {used}（存储后端：{backend}）。',
+    'storage.usageLimited': '文档与缓存已占用 {used} / 约 {limit}（存储后端：{backend}，浏览器对它有固定上限）。',
+    'storage.full': '浏览器存储空间已满（{backend}），这次没能保存。可以删除不再需要的文档，或清空解析缓存后重试。',
+    'storage.writeFailed': '写入浏览器存储失败：{msg}',
+    'panel.tabGrammar': '句子结构',
+    'panel.tabVocab': '难词讲解',
+    'chat.placeholder': '继续追问这句话……',
+    'chat.send': '发送',
+    'emptyState.text': '还没有加载正文。<br>点击右上角「⚙ 设置」导入 .txt / .docx / .pdf 文件，或粘贴文本。',
+    'emptyState.openSettings': '打开设置',
+    'book.chapterFallback': '第 {n} 章',
+    'errors.noKeyNetworkFail': '网络请求失败。如果你不在 claude.ai 里运行本工具，请在设置中填入你自己的 API key。如果你确实在 claude.ai 沙盒里，请检查网络连接后重试。',
+    'errors.networkFail': '网络请求失败：可能是断网、被浏览器扩展拦截，或被 CORS 拒绝。如果是 CORS，可改用 Gemini（没有此限制），或按 README 启动 server.py / Cloudflare Worker 代理。',
+    'errors.noKeyStatusFail': '请求失败（状态码 {status}）{detail}。如果你不在 claude.ai 里运行本工具，请在设置中填入你自己的 API key。',
+    'errors.invalidKey': 'API key 被拒绝（状态码 401/403）{detail}。请检查 key 是否填错、是否已过期，以及它是否属于当前选中的服务商——把 OpenAI 的 key 填进 Anthropic 一栏是最常见的原因。',
+    'errors.rateLimited': '请求过于频繁或已达用量上限（状态码 429）{detail}',
+    'errors.apiFailed': 'API 请求失败（状态码 {status}）{detail}',
+    'errors.emptyResponse': '返回内容为空，请重试',
+    'errors.vocabParseFailed': '（未能解析出词汇部分，请重试）',
+    'errors.providerKeyRequired': '尚未填写 {provider} 的 API key，请在设置中填入后再试。',
+    'import.parsing': '正在解析 {name} …',
+    'import.mammothFail': 'mammoth.js 未加载成功，请检查网络连接',
+    'import.pdfjsFail': 'pdf.js 未加载成功，请检查网络连接',
+    'import.epubjsFail': 'epub.js 未加载成功，请检查网络连接',
+    'import.epubApplied': '已从 {name} 导入 {count} 个章节（共约 {chars} 字符），已按 epub 自带目录自动拆分。',
+    'import.pdfApplied': '已从 {name} 导入 {count} 个章节（共约 {chars} 字符），已按 PDF 自带目录自动拆分。',
+    'import.pdfGlyphWarning': ' 另外发现 {count} 处该 PDF 字体无法正常映射的字符，已用 <编号> 形式标出，请检查原文中标记为 <...> 的位置并手动核对/替换。',
+    'import.epubTimeout': 'epub 解析超时，文件可能已损坏或格式不受支持。',
+    'import.unsupportedType': '不支持的文件类型：.{ext}。支持 .txt / .docx / .pdf / .epub。像 .odt / .rtf / .doc 这类格式，请先用 LibreOffice 或 Word 另存为 .docx 再导入。',
+    'import.noText': '未能从文件中提取到文字内容，请检查文件是否为空或是扫描版 PDF（图片，无法提取文字）。',
+    'import.extracted': '已从 {name} 提取 {count} 个字符，请检查下方文本框内容，确认无误后点击「另存为新文档」（或「保存到当前文档」覆盖当前这本）。',
+    'import.parseFailed': '解析失败：{msg}',
+    'import.emptyTextarea': '文本框为空，无法应用。',
+    'import.untitledDocument': '未命名文档',
+    'import.applied': '已应用新文本，共 {count} 段{note}。',
+    'import.appliedChapterNote': '，识别为 {n} 个章节',
+    'import.appliedNew': '已另存为新文档，共 {count} 段{note}。',
+    'import.appliedUpdate': '已保存到当前文档，共 {count} 段{note}。',
+    'import.loadedExample': '已载入示例文本（Elisabeth von Heyking《Tagebücher aus vier Weltteilen》全书，公版）。',
+    'toc.title': '目录',
+    'settings.title': '设置',
+    'settings.tabAi': 'AI 与模型',
+    'settings.tabLang': '语言',
+    'settings.tabAppearance': '外观',
+    'settings.tabDocument': '文档',
+    'settings.providerLabel': 'AI 服务商',
+    'settings.providerDesc': '每个服务商的 key / 模型 / 接口地址分开保存，切换服务商不会丢失其它服务商已填的信息。所有 key 只存在这台设备浏览器的本地存储（localStorage）中，不会上传到任何服务器（本工具没有后端）。请勿在公用/共享电脑上保存 key。',
+    'settings.providerOpenaiCompatible': 'OpenAI 兼容',
+    'settings.anthropicDesc': '可在 <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> 申请。留空时会自动尝试假设本工具运行在 claude.ai 的 artifact 沙盒里（沙盒有自己的鉴权代理）。',
+    'settings.modelLabel': '模型',
+    'settings.baseUrlOptionalLabel': '接口地址（可选，留空用官方地址）',
+    'settings.anthropicWarning': 'ℹ️ 本工具已通过 <code>anthropic-dangerous-direct-browser-access</code> 请求头启用浏览器直连，正常情况下无需额外代理即可使用。但请注意：把 key 直接放进前端代码/浏览器本地存储，意味着任何能访问这台设备浏览器数据的人理论上都能取得这个 key。不要在公用/共享电脑上保存，不建议长期使用高额度 key，可在控制台单独为这个用途创建一个限额较低的 key。',
+    'settings.openaiDesc': '适用于 OpenAI 官方，以及任何暴露相同 <code>/chat/completions</code> 接口的兼容服务（DeepSeek、Groq、本地 Ollama 等）——把下面的接口地址换成对应服务的地址即可。',
+    'settings.baseUrlLabel': '接口地址（Base URL）',
+    'settings.openaiWarning': 'ℹ️ 部分服务商不允许浏览器直接跨域（CORS）调用其 API——如果遇到"网络请求失败"，通常是这个原因，需要换用允许浏览器直连的服务商，或自建一个允许 CORS 的转发代理。',
+    'settings.geminiDesc': '可在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 申请。',
+    'settings.uiLangLabel': '界面语言',
+    'settings.sentenceLangLabel': '原文分句规则（按语言的缩写词表不同）',
+    'import.scannedPdf': '这个 PDF 共 {pages} 页，但没有文字层——它是扫描件（纸页的图片）。需要先用 OCR 工具（如 Adobe Acrobat、ABBYY FineReader、ocrmypdf）识别成可选中文字的 PDF，再导入。',
+    'toc.closeLabel': '关闭目录',
+    'settings.closeLabel': '关闭设置',
+    'toolbar.pageInputLabel': '页码',
+    'book.titlePlaceholder': '作品名 / 作者（可编辑）',
+    'book.chapterPlaceholder': '章节标题',
+    'book.datesPlaceholder': '副标题 / 日期范围（可选）',
+    'settings.customLangPlaceholder': '填写目标语言名称，如 Suomi / Tiếng Việt',
+    'import.pastePlaceholder': '在此粘贴原文……',
+    'app.title': 'Lingua Lector — 交互式外语精读阅读器',
+    'settings.langGeneric': '通用（其他拉丁字母语言）',
+    'settings.sentenceLangDesc': '决定「Dr.」「Mr.」「z. B.」这类缩写不会被误判成句子结束。选错也不会出大错，只是偶尔切分不够精细。',
+    'settings.outputLangLabel': '解析输出语言',
+    'settings.outputLangDesc': '句子结构与词汇讲解会用这个语言输出。选"自定义"可填任意语言名称。',
+    'settings.custom': '自定义…',
+    'settings.customLangPlaceholder': '填写目标语言名称，如 Suomi / Tiếng Việt',
+    'settings.themeLabel': '主题',
+    'settings.themeLight': '浅色',
+    'settings.themeDark': '深色',
+    'settings.themeSepia': '护眼黄',
+    'settings.fontLabel': '正文字体与字号',
+    'settings.fontSerif': '衬线（默认）',
+    'settings.fontSans': '无衬线',
+    'settings.fontMono': '等宽',
+    'settings.fontSizeLabel': '字号：',
+    'settings.paginationLabel': '分页方式',
+    'settings.paginationByParagraph': '按段落数分页',
+    'settings.paginationFitHeight': '自适应一屏一页',
+    'settings.paginationNone': '不分页（长页面）',
+    'settings.parasPerPageLabel': '每页段落数：',
+    'settings.libraryLabel': '已保存的文档',
+    'settings.libraryDesc': '切换文档不会重新分词，也不会影响其他文档已缓存的解析结果和阅读进度。',
+    'settings.libraryBuiltin': '内置示例',
+    'settings.libraryChapterCount': '{n} 个章节',
+    'settings.libraryUntitled': '未命名文档',
+    'settings.libraryDelete': '删除此文档',
+    'settings.libraryClearCache': '清除此文档的解析缓存',
+    'settings.libraryRestoreExample': '恢复内置示例书',
+    'settings.chapterLabel': '当前章节',
+    'settings.chapterDesc': '内置全书共 12 个章节，切换后自动跳转到该章节第一页。',
+    'settings.importLabel': '导入文本',
+    'settings.importDesc': '支持 .txt / .docx / .pdf / .epub。每次导入都会作为一个新文档加入上面的列表。',
+    'settings.importDropHint': '点击选择文件，或将 .txt / .docx / .pdf / .epub 拖拽到此处',
+    'settings.pasteLabel': '或直接粘贴 / 编辑正文',
+    'settings.pasteDesc': '每段之间用一个空行分隔。「另存为新文档」会把它作为一个新文档加入上面的列表，「保存到当前文档」则覆盖当前打开的这一本。',
+    'settings.pastePlaceholder': '在此粘贴原文……',
+    'settings.splitChaptersLabel': '尝试识别标题并拆分为多章节（独立成段、不以句末标点结尾的短行会被当作候选标题；效果为尽力而为，可在应用后手动调整）',
+    'settings.loadExample': '载入示例文本',
+    'settings.applyText': '应用文本',
+    'settings.applyTextNew': '另存为新文档',
+    'settings.applyTextUpdate': '保存到当前文档',
+    'book.addDateRange': '+ 添加副标题/日期范围',
+    'settings.clearCache': '清空解析缓存',
+    'settings.save': '保存设置',
+  },
+  'zh-hant': {
+    'toolbar.hideSidebar': '隱藏側欄',
+    'toolbar.showSidebar': '顯示側欄',
+    'toolbar.toc': '📖 目錄',
+    'toolbar.prevPage': '← 上一頁',
+    'toolbar.nextPage': '下一頁 →',
+    'toolbar.pagerStatus': '第 {page} / {total} 頁',
+    'toolbar.pagerPrefix': '第 ',
+    'toolbar.pagerSuffix': ' 頁',
+    'toolbar.openSettings': '⚙ 設定',
+    'toolbar.hint': '點擊任意句子查看語法與詞彙解析 · 快捷鍵 ← → 翻頁 · Esc 關閉',
+    'panel.title': '句子解析',
+    'panel.closeTitle': '收起側欄',
+    'panel.emptyMsg': '點擊左側正文中的任意一句，<br>這裡會顯示句子結構拆解和詞彙講解。',
+    'panel.loading': '正在解析這句話…',
+    'panel.retry': '重試',
+    'panel.reanalyze': '重新解析這句話（跳過快取）',
+    'cache.cleared': '已清空目前文件所有章節的解析快取（不影響其他文件、已儲存的設定和文字）。',
+    'cache.clearedDoc': '已清除《{title}》的解析快取。',
+    'storage.usage': '文件與快取已佔用 {used}（儲存後端：{backend}）。',
+    'storage.usageLimited': '文件與快取已佔用 {used} / 約 {limit}（儲存後端：{backend}，瀏覽器對它有固定上限）。',
+    'storage.full': '瀏覽器儲存空間已滿（{backend}），這次沒能儲存。可以刪除不再需要的文件，或清空解析快取後重試。',
+    'storage.writeFailed': '寫入瀏覽器儲存失敗：{msg}',
+    'panel.tabGrammar': '句子結構',
+    'panel.tabVocab': '難詞講解',
+    'chat.placeholder': '繼續追問這句話……',
+    'chat.send': '傳送',
+    'emptyState.text': '還沒有載入正文。<br>點擊右上角「⚙ 設定」匯入 .txt / .docx / .pdf 檔案，或貼上文字。',
+    'emptyState.openSettings': '開啟設定',
+    'book.chapterFallback': '第 {n} 章',
+    'errors.noKeyNetworkFail': '網路請求失敗。如果你不在 claude.ai 裡運行本工具，請在設定中填入你自己的 API key。如果你確實在 claude.ai 沙盒裡，請檢查網路連線後重試。',
+    'errors.networkFail': '網路請求失敗：可能是斷網、被瀏覽器擴充功能攔截，或被 CORS 拒絕。如果是 CORS，可改用 Gemini（沒有此限制），或依 README 啟動 server.py / Cloudflare Worker 代理。',
+    'errors.noKeyStatusFail': '請求失敗（狀態碼 {status}）{detail}。如果你不在 claude.ai 裡運行本工具，請在設定中填入你自己的 API key。',
+    'errors.invalidKey': 'API key 被拒絕（狀態碼 401/403）{detail}。請檢查 key 是否填錯、是否已過期，以及它是否屬於目前選中的服務商——把 OpenAI 的 key 填進 Anthropic 一欄是最常見的原因。',
+    'errors.rateLimited': '請求過於頻繁或已達用量上限（狀態碼 429）{detail}',
+    'errors.apiFailed': 'API 請求失敗（狀態碼 {status}）{detail}',
+    'errors.emptyResponse': '回傳內容為空，請重試',
+    'errors.vocabParseFailed': '（未能解析出詞彙部分，請重試）',
+    'errors.providerKeyRequired': '尚未填寫 {provider} 的 API key，請在設定中填入後再試。',
+    'import.parsing': '正在解析 {name} …',
+    'import.mammothFail': 'mammoth.js 未載入成功，請檢查網路連線',
+    'import.pdfjsFail': 'pdf.js 未載入成功，請檢查網路連線',
+    'import.epubjsFail': 'epub.js 未載入成功，請檢查網路連線',
+    'import.epubApplied': '已從 {name} 匯入 {count} 個章節（共約 {chars} 字元），已依 epub 內建目錄自動拆分。',
+    'import.pdfApplied': '已從 {name} 匯入 {count} 個章節（共約 {chars} 字元），已依 PDF 內建目錄自動拆分。',
+    'import.pdfGlyphWarning': ' 另外發現 {count} 處該 PDF 字型無法正常對應的字元，已用 <編號> 形式標出，請檢查原文中標記為 <...> 的位置並手動核對/取代。',
+    'import.epubTimeout': 'epub 解析逾時，檔案可能已損毀或格式不受支援。',
+    'import.unsupportedType': '不支援的檔案類型：.{ext}。支援 .txt / .docx / .pdf / .epub。像 .odt / .rtf / .doc 這類格式，請先用 LibreOffice 或 Word 另存為 .docx 再匯入。',
+    'import.noText': '未能從檔案中擷取到文字內容，請檢查檔案是否為空或是掃描版 PDF（圖片，無法擷取文字）。',
+    'import.extracted': '已從 {name} 擷取 {count} 個字元，請檢查下方文字框內容，確認無誤後點擊「另存為新文件」（或「儲存到目前文件」覆蓋目前這本）。',
+    'import.parseFailed': '解析失敗：{msg}',
+    'import.emptyTextarea': '文字框為空，無法套用。',
+    'import.untitledDocument': '未命名文件',
+    'import.applied': '已套用新文字，共 {count} 段{note}。',
+    'import.appliedChapterNote': '，識別為 {n} 個章節',
+    'import.appliedNew': '已另存為新文件，共 {count} 段{note}。',
+    'import.appliedUpdate': '已儲存到目前文件，共 {count} 段{note}。',
+    'import.loadedExample': '已載入範例文字（Elisabeth von Heyking《Tagebücher aus vier Weltteilen》全書，公版）。',
+    'toc.title': '目錄',
+    'settings.title': '設定',
+    'settings.tabAi': 'AI 與模型',
+    'settings.tabLang': '語言',
+    'settings.tabAppearance': '外觀',
+    'settings.tabDocument': '文件',
+    'settings.providerLabel': 'AI 服務商',
+    'settings.providerDesc': '每個服務商的 key / 模型 / 端點分開儲存，切換服務商不會遺失其他服務商已填的資訊。所有 key 只存在這台裝置瀏覽器的本機儲存（localStorage）中，不會上傳到任何伺服器（本工具沒有後端）。請勿在公用/共享電腦上儲存 key。',
+    'settings.providerOpenaiCompatible': 'OpenAI 相容',
+    'settings.anthropicDesc': '可在 <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> 申請。留空時會自動嘗試假設本工具運行在 claude.ai 的 artifact 沙盒裡（沙盒有自己的鑑權代理）。',
+    'settings.modelLabel': '模型',
+    'settings.baseUrlOptionalLabel': '接口地址（選填，留空使用官方地址）',
+    'settings.anthropicWarning': 'ℹ️ 本工具已透過 <code>anthropic-dangerous-direct-browser-access</code> 請求標頭啟用瀏覽器直連，正常情況下無需額外代理即可使用。但請注意：把 key 直接放進前端程式碼/瀏覽器本機儲存，意味著任何能存取這台裝置瀏覽器資料的人理論上都能取得這個 key。不要在公用/共享電腦上儲存，不建議長期使用高額度 key，可在控制台單獨為這個用途建立一個限額較低的 key。',
+    'settings.openaiDesc': '適用於 OpenAI 官方，以及任何暴露相同 <code>/chat/completions</code> 介面的相容服務（DeepSeek、Groq、本機 Ollama 等）——把下面的端點換成對應服務的地址即可。',
+    'settings.baseUrlLabel': '端點（Base URL）',
+    'settings.openaiWarning': 'ℹ️ 部分服務商不允許瀏覽器直接跨網域（CORS）呼叫其 API——如果遇到「網路請求失敗」，通常是這個原因，需要換用允許瀏覽器直連的服務商，或自建一個允許 CORS 的轉發代理。',
+    'settings.geminiDesc': '可在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 申請。',
+    'settings.uiLangLabel': '介面語言',
+    'settings.sentenceLangLabel': '原文分句規則（依語言的縮寫詞表不同）',
+    'import.scannedPdf': '這個 PDF 共 {pages} 頁，但沒有文字層——它是掃描件（紙頁的圖片）。需要先用 OCR 工具（如 Adobe Acrobat、ABBYY FineReader、ocrmypdf）辨識成可選取文字的 PDF，再匯入。',
+    'toc.closeLabel': '關閉目錄',
+    'settings.closeLabel': '關閉設定',
+    'toolbar.pageInputLabel': '頁碼',
+    'book.titlePlaceholder': '作品名 / 作者（可編輯）',
+    'book.chapterPlaceholder': '章節標題',
+    'book.datesPlaceholder': '副標題 / 日期範圍（可選）',
+    'settings.customLangPlaceholder': '填寫目標語言名稱，如 Suomi / Tiếng Việt',
+    'import.pastePlaceholder': '在此貼上原文……',
+    'app.title': 'Lingua Lector — 互動式外語精讀閱讀器',
+    'settings.langGeneric': '通用（其他拉丁字母語言）',
+    'settings.sentenceLangDesc': '決定「Dr.」「Mr.」「z. B.」這類縮寫不會被誤判成句子結束。選錯也不會出大錯，只是偶爾切分不夠精細。',
+    'settings.outputLangLabel': '解析輸出語言',
+    'settings.outputLangDesc': '句子結構與詞彙講解會用這個語言輸出。選「自訂」可填任意語言名稱。',
+    'settings.custom': '自訂…',
+    'settings.customLangPlaceholder': '填寫目標語言名稱，如 Suomi / Tiếng Việt',
+    'settings.themeLabel': '主題',
+    'settings.themeLight': '淺色',
+    'settings.themeDark': '深色',
+    'settings.themeSepia': '護眼黃',
+    'settings.fontLabel': '正文字型與字號',
+    'settings.fontSerif': '襯線（預設）',
+    'settings.fontSans': '無襯線',
+    'settings.fontMono': '等寬',
+    'settings.fontSizeLabel': '字號：',
+    'settings.paginationLabel': '分頁方式',
+    'settings.paginationByParagraph': '依段落數分頁',
+    'settings.paginationFitHeight': '自動適應一螢幕一頁',
+    'settings.paginationNone': '不分頁（長頁面）',
+    'settings.parasPerPageLabel': '每頁段落數：',
+    'settings.libraryLabel': '已儲存的文件',
+    'settings.libraryDesc': '切換文件不會重新分句，也不會影響其他文件已快取的解析結果和閱讀進度。',
+    'settings.libraryBuiltin': '內建範例',
+    'settings.libraryChapterCount': '{n} 個章節',
+    'settings.libraryUntitled': '未命名文件',
+    'settings.libraryDelete': '刪除此文件',
+    'settings.libraryClearCache': '清除此文件的解析快取',
+    'settings.libraryRestoreExample': '恢復內建示例書',
+    'settings.chapterLabel': '目前章節',
+    'settings.chapterDesc': '內建全書共 12 個章節，切換後自動跳轉到該章節第一頁。',
+    'settings.importLabel': '匯入文字',
+    'settings.importDesc': '支援 .txt / .docx / .pdf / .epub。每次匯入都會作為一份新文件加入上方清單。',
+    'settings.importDropHint': '點擊選擇檔案，或將 .txt / .docx / .pdf / .epub 拖曳到此處',
+    'settings.pasteLabel': '或直接貼上／編輯正文',
+    'settings.pasteDesc': '每段之間用一個空行分隔。「另存為新文件」會把它作為一份新文件加入上方清單，「儲存到目前文件」則覆蓋目前開啟的這一份。',
+    'settings.pastePlaceholder': '在此貼上原文……',
+    'settings.splitChaptersLabel': '嘗試識別標題並拆分為多章節（獨立成段、不以句末標點結尾的短行會被當作候選標題；效果為盡力而為，可在套用後手動調整）',
+    'settings.loadExample': '載入範例文字',
+    'settings.applyText': '套用文字',
+    'settings.applyTextNew': '另存為新文件',
+    'settings.applyTextUpdate': '儲存到目前文件',
+    'book.addDateRange': '+ 新增副標題/日期範圍',
+    'settings.clearCache': '清空解析快取',
+    'settings.save': '儲存設定',
+  },
+  en: {
+    'toolbar.hideSidebar': 'Hide panel',
+    'toolbar.showSidebar': 'Show panel',
+    'toolbar.toc': '📖 Contents',
+    'toolbar.prevPage': '← Prev',
+    'toolbar.nextPage': 'Next →',
+    'toolbar.pagerStatus': 'Page {page} / {total}',
+    'toolbar.pagerPrefix': 'Page ',
+    'toolbar.pagerSuffix': '',
+    'toolbar.openSettings': '⚙ Settings',
+    'toolbar.hint': 'Click any sentence for grammar & vocabulary · ← → to page · Esc to close',
+    'panel.title': 'Sentence analysis',
+    'panel.closeTitle': 'Collapse panel',
+    'panel.emptyMsg': 'Click any sentence in the text,<br>and its structure and vocabulary breakdown will appear here.',
+    'panel.loading': 'Analyzing this sentence…',
+    'panel.retry': 'Retry',
+    'panel.reanalyze': 'Analyse this sentence again (skip the cache)',
+    'cache.cleared': 'Cleared the analysis cache for all chapters in this document (other documents, saved settings and text are unaffected).',
+    'cache.clearedDoc': 'Cleared the analysis cache for “{title}”.',
+    'storage.usage': 'Documents and caches take up {used} (stored in {backend}).',
+    'storage.usageLimited': 'Documents and caches take up {used} of about {limit} (stored in {backend}, which the browser caps).',
+    'storage.full': 'Browser storage is full ({backend}), so this could not be saved. Delete a document you no longer need, or clear the analysis cache, and try again.',
+    'storage.writeFailed': 'Writing to browser storage failed: {msg}',
+    'panel.tabGrammar': 'Sentence structure',
+    'panel.tabVocab': 'Vocabulary',
+    'chat.placeholder': 'Ask a follow-up about this sentence…',
+    'chat.send': 'Send',
+    'emptyState.text': 'No text loaded yet.<br>Click "⚙ Settings" in the top right to import a .txt / .docx / .pdf file, or paste text.',
+    'emptyState.openSettings': 'Open settings',
+    'book.chapterFallback': 'Chapter {n}',
+    'errors.noKeyNetworkFail': 'Network request failed. If you are not running this tool inside claude.ai, enter your own API key in Settings. If you are inside the claude.ai sandbox, check your connection and retry.',
+    'errors.networkFail': 'The request failed: no connection, a browser extension blocked it, or CORS refused it. If it is CORS, switch to Gemini (which has no such restriction) or run the server.py / Cloudflare Worker proxy described in the README.',
+    'errors.noKeyStatusFail': 'Request failed (status {status}){detail}. If you are not running this tool inside claude.ai, enter your own API key in Settings.',
+    'errors.invalidKey': 'The API key was rejected (401/403){detail}. Check that it is correct, not expired, and belongs to the provider currently selected — pasting an OpenAI key into the Anthropic field is the usual cause.',
+    'errors.rateLimited': 'Too many requests or usage limit reached (status 429){detail}',
+    'errors.apiFailed': 'API request failed (status {status}){detail}',
+    'errors.emptyResponse': 'Empty response, please retry',
+    'errors.vocabParseFailed': '(Could not parse the vocabulary section, please retry)',
+    'errors.providerKeyRequired': 'No {provider} API key set yet — add one in Settings and try again.',
+    'import.parsing': 'Parsing {name} …',
+    'import.mammothFail': 'mammoth.js failed to load — check your network connection',
+    'import.pdfjsFail': 'pdf.js failed to load — check your network connection',
+    'import.epubjsFail': 'epub.js failed to load — check your network connection',
+    'import.epubApplied': 'Imported {count} chapters from {name} (~{chars} characters total), split automatically using the epub\'s own table of contents.',
+    'import.pdfApplied': 'Imported {count} chapters from {name} (~{chars} characters total), split automatically using the PDF\'s own embedded table of contents.',
+    'import.pdfGlyphWarning': ' Also found {count} character(s) this PDF\'s font couldn\'t map correctly, marked as <code> placeholders -- please check and manually fix any <...> spots in the text.',
+    'import.epubTimeout': 'Timed out parsing the epub — the file may be corrupt or use an unsupported format.',
+    'import.unsupportedType': 'Unsupported file type: .{ext}. Supported: .txt / .docx / .pdf / .epub. For formats like .odt / .rtf / .doc, save the file as .docx in LibreOffice or Word first.',
+    'import.noText': 'No text could be extracted from this file — it may be empty, or a scanned/image-only PDF (no OCR support).',
+    'import.extracted': 'Extracted {count} characters from {name}. Check the text box below, then click "Save as new document" (or "Save to current document" to overwrite the open one).',
+    'import.parseFailed': 'Parsing failed: {msg}',
+    'import.emptyTextarea': 'The text box is empty — nothing to apply.',
+    'import.untitledDocument': 'Untitled document',
+    'import.applied': 'Applied new text: {count} paragraphs{note}.',
+    'import.appliedChapterNote': ', detected as {n} chapters',
+    'import.appliedNew': 'Saved as a new document: {count} paragraphs{note}.',
+    'import.appliedUpdate': 'Saved to the current document: {count} paragraphs{note}.',
+    'import.loadedExample': 'Loaded the example text (Elisabeth von Heyking, "Tagebücher aus vier Weltteilen", full book, public domain).',
+    'toc.title': 'Contents',
+    'settings.title': 'Settings',
+    'settings.tabAi': 'AI & Model',
+    'settings.tabLang': 'Language',
+    'settings.tabAppearance': 'Appearance',
+    'settings.tabDocument': 'Document',
+    'settings.providerLabel': 'AI provider',
+    'settings.providerDesc': "Each provider keeps its own key / model / endpoint, so switching providers won't lose what you entered for the others. All keys are stored only in this browser's local storage (localStorage) — this tool has no backend. Don't save keys on a shared/public computer.",
+    'settings.providerOpenaiCompatible': 'OpenAI-compatible',
+    'settings.anthropicDesc': 'Get one at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Leave blank to assume this tool is running inside the claude.ai artifact sandbox (which has its own auth proxy).',
+    'settings.modelLabel': 'Model',
+    'settings.baseUrlOptionalLabel': 'Endpoint (optional, leave blank for the official one)',
+    'settings.anthropicWarning': 'ℹ️ This tool uses the <code>anthropic-dangerous-direct-browser-access</code> header for direct browser access — no extra proxy needed under normal circumstances. But note: putting a key directly into frontend code/browser storage means anyone with access to this device\'s browser data could in principle retrieve it. Don\'t save it on a shared/public computer, avoid using a high-limit key long-term, and consider creating a separate lower-limit key in the console just for this.',
+    'settings.openaiDesc': 'Works with OpenAI itself, and any compatible service exposing the same <code>/chat/completions</code> endpoint (DeepSeek, Groq, local Ollama, etc.) — just point the base URL below at it.',
+    'settings.baseUrlLabel': 'Endpoint (Base URL)',
+    'settings.openaiWarning': 'ℹ️ Some providers don\'t allow direct cross-origin (CORS) calls from a browser — that\'s usually why you\'d see a "network request failed" error. Switch to a provider that allows direct browser access, or set up your own CORS-enabled proxy.',
+    'settings.geminiDesc': 'Get one at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.uiLangLabel': 'Interface language',
+    'settings.sentenceLangLabel': 'Sentence-splitting rules (abbreviation list varies by language)',
+    'import.scannedPdf': 'This PDF has {pages} pages but no text layer — it is a scan (images of the paper). Run it through OCR first (Adobe Acrobat, ABBYY FineReader, ocrmypdf) so the text becomes selectable, then import it again.',
+    'toc.closeLabel': 'Close table of contents',
+    'settings.closeLabel': 'Close settings',
+    'toolbar.pageInputLabel': 'Page number',
+    'book.titlePlaceholder': 'Title / author (editable)',
+    'book.chapterPlaceholder': 'Chapter title',
+    'book.datesPlaceholder': 'Subtitle / date range (optional)',
+    'settings.customLangPlaceholder': 'Name the target language, e.g. Suomi / Tiếng Việt',
+    'import.pastePlaceholder': 'Paste the source text here…',
+    'app.title': 'Lingua Lector — interactive close-reading for foreign-language texts',
+    'settings.langGeneric': 'Generic (other Latin-script languages)',
+    'settings.sentenceLangDesc': 'Prevents abbreviations like "Dr.", "Mr.", "z. B." from being mistaken for the end of a sentence. Picking the wrong one is not a big deal — splitting is just occasionally less precise.',
+    'settings.outputLangLabel': 'Analysis output language',
+    'settings.outputLangDesc': 'The sentence structure and vocabulary breakdown will be written in this language. Choose "Custom" to enter any language name.',
+    'settings.custom': 'Custom…',
+    'settings.customLangPlaceholder': 'Enter a target language, e.g. Suomi / Tiếng Việt',
+    'settings.themeLabel': 'Theme',
+    'settings.themeLight': 'Light',
+    'settings.themeDark': 'Dark',
+    'settings.themeSepia': 'Sepia',
+    'settings.fontLabel': 'Reading font & size',
+    'settings.fontSerif': 'Serif (default)',
+    'settings.fontSans': 'Sans-serif',
+    'settings.fontMono': 'Monospace',
+    'settings.fontSizeLabel': 'Size:',
+    'settings.paginationLabel': 'Pagination',
+    'settings.paginationByParagraph': 'By paragraph count',
+    'settings.paginationFitHeight': 'Fit one screen per page',
+    'settings.paginationNone': 'No pagination (long scroll)',
+    'settings.parasPerPageLabel': 'Paragraphs per page:',
+    'settings.libraryLabel': 'Saved documents',
+    'settings.libraryDesc': "Switching documents never re-splits sentences, and never touches another document's cached analyses or reading progress.",
+    'settings.libraryBuiltin': 'Built-in sample',
+    'settings.libraryChapterCount': '{n} chapters',
+    'settings.libraryUntitled': 'Untitled document',
+    'settings.libraryDelete': 'Delete this document',
+    'settings.libraryClearCache': 'Clear this document’s analysis cache',
+    'settings.libraryRestoreExample': 'Restore the built-in example book',
+    'settings.chapterLabel': 'Current chapter',
+    'settings.chapterDesc': "The built-in book has 12 chapters — switching jumps to that chapter's first page.",
+    'settings.importLabel': 'Import text',
+    'settings.importDesc': 'Supports .txt / .docx / .pdf / .epub. Each import is added as a new document in the list above.',
+    'settings.importDropHint': 'Click to choose a file, or drag a .txt / .docx / .pdf / .epub here',
+    'settings.pasteLabel': 'Or paste / edit text directly',
+    'settings.pasteDesc': 'Separate paragraphs with a blank line. "Save as new document" adds it to the list above; "Save to current document" overwrites the one that is open.',
+    'settings.pastePlaceholder': 'Paste the source text here…',
+    'settings.splitChaptersLabel': 'Try to detect headings and split into chapters (standalone short lines not ending in sentence punctuation are treated as heading candidates; best-effort — you can adjust manually afterward)',
+    'settings.loadExample': 'Load example text',
+    'settings.applyText': 'Apply text',
+    'settings.applyTextNew': 'Save as new document',
+    'settings.applyTextUpdate': 'Save to current document',
+    'book.addDateRange': '+ Add subtitle/date range',
+    'settings.clearCache': 'Clear analysis cache',
+    'settings.save': 'Save settings',
+  },
+  de: {
+    'toolbar.hideSidebar': 'Seitenleiste ausblenden',
+    'toolbar.showSidebar': 'Seitenleiste einblenden',
+    'toolbar.toc': '📖 Inhalt',
+    'toolbar.prevPage': '← Zurück',
+    'toolbar.nextPage': 'Weiter →',
+    'toolbar.pagerStatus': 'Seite {page} / {total}',
+    'toolbar.pagerPrefix': 'Seite ',
+    'toolbar.pagerSuffix': '',
+    'toolbar.openSettings': '⚙ Einstellungen',
+    'toolbar.hint': 'Klicke auf einen Satz für Grammatik & Vokabeln · ← → zum Blättern · Esc zum Schließen',
+    'panel.title': 'Satzanalyse',
+    'panel.closeTitle': 'Seitenleiste einklappen',
+    'panel.emptyMsg': 'Klicke auf einen beliebigen Satz im Text,<br>dort erscheinen Satzstruktur und Vokabelerklärung.',
+    'panel.loading': 'Dieser Satz wird analysiert…',
+    'panel.retry': 'Erneut versuchen',
+    'panel.reanalyze': 'Diesen Satz neu analysieren (ohne Cache)',
+    'cache.cleared': 'Analyse-Cache für alle Kapitel dieses Dokuments geleert (andere Dokumente sowie gespeicherte Einstellungen und Texte bleiben unberührt).',
+    'cache.clearedDoc': 'Analyse-Cache für „{title}“ geleert.',
+    'storage.usage': 'Dokumente und Caches belegen {used} (gespeichert in {backend}).',
+    'storage.usageLimited': 'Dokumente und Caches belegen {used} von etwa {limit} (gespeichert in {backend}, das der Browser begrenzt).',
+    'storage.full': 'Der Browser-Speicher ist voll ({backend}); es konnte nichts gespeichert werden. Löschen Sie ein Dokument, das Sie nicht mehr brauchen, oder leeren Sie den Analyse-Cache, und versuchen Sie es erneut.',
+    'storage.writeFailed': 'Schreiben in den Browser-Speicher fehlgeschlagen: {msg}',
+    'panel.tabGrammar': 'Satzstruktur',
+    'panel.tabVocab': 'Vokabeln',
+    'chat.placeholder': 'Zu diesem Satz nachfragen…',
+    'chat.send': 'Senden',
+    'emptyState.text': 'Noch kein Text geladen.<br>Klicke oben rechts auf „⚙ Einstellungen", um eine .txt-/.docx-/.pdf-Datei zu importieren, oder füge Text ein.',
+    'emptyState.openSettings': 'Einstellungen öffnen',
+    'book.chapterFallback': 'Kapitel {n}',
+    'errors.noKeyNetworkFail': 'Netzwerkanfrage fehlgeschlagen. Wenn du dieses Tool nicht in claude.ai nutzt, gib in den Einstellungen deinen eigenen API-Key ein. Falls du dich in der claude.ai-Sandbox befindest, prüfe deine Verbindung und versuche es erneut.',
+    'errors.networkFail': 'Die Anfrage schlug fehl: keine Verbindung, von einer Browser-Erweiterung blockiert oder von CORS abgelehnt. Bei CORS können Sie zu Gemini wechseln (dort gibt es die Einschränkung nicht) oder den in der README beschriebenen Proxy (server.py / Cloudflare Worker) verwenden.',
+    'errors.noKeyStatusFail': 'Anfrage fehlgeschlagen (Status {status}){detail}. Wenn du dieses Tool nicht in claude.ai nutzt, gib in den Einstellungen deinen eigenen API-Key ein.',
+    'errors.invalidKey': 'Der API-Key wurde abgelehnt (401/403){detail}. Prüfen Sie, ob er korrekt und nicht abgelaufen ist und zum aktuell gewählten Anbieter gehört — ein OpenAI-Key im Anthropic-Feld ist die häufigste Ursache.',
+    'errors.rateLimited': 'Zu viele Anfragen oder Nutzungslimit erreicht (Status 429){detail}',
+    'errors.apiFailed': 'API-Anfrage fehlgeschlagen (Status {status}){detail}',
+    'errors.emptyResponse': 'Leere Antwort, bitte erneut versuchen',
+    'errors.vocabParseFailed': '(Vokabelabschnitt konnte nicht erkannt werden, bitte erneut versuchen)',
+    'errors.providerKeyRequired': 'Noch kein API-Key für {provider} hinterlegt — bitte in den Einstellungen eintragen und erneut versuchen.',
+    'import.parsing': '{name} wird analysiert …',
+    'import.mammothFail': 'mammoth.js konnte nicht geladen werden – Netzwerkverbindung prüfen',
+    'import.pdfjsFail': 'pdf.js konnte nicht geladen werden – Netzwerkverbindung prüfen',
+    'import.epubjsFail': 'epub.js konnte nicht geladen werden – Netzwerkverbindung prüfen',
+    'import.epubApplied': '{count} Kapitel aus {name} importiert (ca. {chars} Zeichen insgesamt), automatisch anhand des Inhaltsverzeichnisses des epub aufgeteilt.',
+    'import.pdfApplied': '{count} Kapitel aus {name} importiert (ca. {chars} Zeichen insgesamt), automatisch anhand des im PDF eingebetteten Inhaltsverzeichnisses aufgeteilt.',
+    'import.pdfGlyphWarning': ' Außerdem wurden {count} Zeichen gefunden, die die Schrift dieses PDFs nicht korrekt zuordnen konnte, markiert als <Code>-Platzhalter -- bitte die <...>-Stellen im Text manuell prüfen/korrigieren.',
+    'import.epubTimeout': 'Zeitüberschreitung beim Analysieren des epub — die Datei ist möglicherweise beschädigt oder in einem nicht unterstützten Format.',
+    'import.unsupportedType': 'Nicht unterstützter Dateityp: .{ext}. Unterstützt werden .txt / .docx / .pdf / .epub. Formate wie .odt / .rtf / .doc bitte zuerst in LibreOffice oder Word als .docx speichern.',
+    'import.noText': 'Aus der Datei konnte kein Text extrahiert werden – sie könnte leer oder ein gescanntes PDF (Bild, kein OCR) sein.',
+    'import.extracted': '{count} Zeichen aus {name} extrahiert. Bitte den Text unten prüfen und danach auf „Als neues Dokument speichern“ klicken (oder „Im aktuellen Dokument speichern“, um das offene Dokument zu überschreiben).',
+    'import.parseFailed': 'Analyse fehlgeschlagen: {msg}',
+    'import.emptyTextarea': 'Das Textfeld ist leer – nichts zu übernehmen.',
+    'import.untitledDocument': 'Unbenanntes Dokument',
+    'import.applied': 'Neuer Text übernommen: {count} Absätze{note}.',
+    'import.appliedChapterNote': ', erkannt als {n} Kapitel',
+    'import.appliedNew': 'Als neues Dokument gespeichert: {count} Absätze{note}.',
+    'import.appliedUpdate': 'Im aktuellen Dokument gespeichert: {count} Absätze{note}.',
+    'import.loadedExample': 'Beispieltext geladen (Elisabeth von Heyking, „Tagebücher aus vier Weltteilen", vollständiges Buch, gemeinfrei).',
+    'toc.title': 'Inhalt',
+    'settings.title': 'Einstellungen',
+    'settings.tabAi': 'KI & Modell',
+    'settings.tabLang': 'Sprache',
+    'settings.tabAppearance': 'Erscheinungsbild',
+    'settings.tabDocument': 'Dokument',
+    'settings.providerLabel': 'KI-Anbieter',
+    'settings.providerDesc': 'Jeder Anbieter speichert Key / Modell / Endpunkt getrennt — beim Wechseln gehen die Angaben der anderen Anbieter nicht verloren. Alle Keys werden nur im lokalen Speicher (localStorage) dieses Browsers abgelegt — dieses Tool hat kein Backend. Keys nicht auf gemeinsam genutzten/öffentlichen Rechnern speichern.',
+    'settings.providerOpenaiCompatible': 'OpenAI-kompatibel',
+    'settings.anthropicDesc': 'Erhältlich unter <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Leer lassen, um anzunehmen, dass dieses Tool in der claude.ai-Artifact-Sandbox läuft (die einen eigenen Auth-Proxy hat).',
+    'settings.modelLabel': 'Modell',
+    'settings.baseUrlOptionalLabel': 'Endpunkt (optional, leer lassen für den offiziellen)',
+    'settings.anthropicWarning': 'ℹ️ Dieses Tool nutzt den Header <code>anthropic-dangerous-direct-browser-access</code> für direkten Browserzugriff — normalerweise ohne zusätzlichen Proxy nutzbar. Beachte aber: Einen Key direkt im Frontend-Code/Browser-Speicher abzulegen bedeutet, dass jeder mit Zugriff auf die Browserdaten dieses Geräts ihn theoretisch auslesen kann. Nicht auf gemeinsam genutzten/öffentlichen Rechnern speichern, keine langfristige Nutzung eines Keys mit hohem Limit — am besten in der Konsole einen separaten Key mit niedrigerem Limit dafür anlegen.',
+    'settings.openaiDesc': 'Funktioniert mit OpenAI selbst sowie jedem kompatiblen Dienst mit demselben <code>/chat/completions</code>-Endpunkt (DeepSeek, Groq, lokales Ollama usw.) — einfach die Basis-URL unten entsprechend setzen.',
+    'settings.baseUrlLabel': 'Endpunkt (Base URL)',
+    'settings.openaiWarning': 'ℹ️ Manche Anbieter erlauben keine direkten Cross-Origin-Aufrufe (CORS) aus dem Browser — das ist meist der Grund für „Netzwerkanfrage fehlgeschlagen". Wechsle zu einem Anbieter mit direktem Browserzugriff oder richte einen eigenen CORS-fähigen Proxy ein.',
+    'settings.geminiDesc': 'Erhältlich im <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.uiLangLabel': 'Oberflächensprache',
+    'settings.sentenceLangLabel': 'Satztrennungsregeln (Abkürzungsliste je nach Sprache)',
+    'import.scannedPdf': 'Diese PDF hat {pages} Seiten, aber keine Textebene — sie ist ein Scan (Bilder der Buchseiten). Lassen Sie sie zuerst per OCR verarbeiten (Adobe Acrobat, ABBYY FineReader, ocrmypdf), sodass der Text markierbar wird, und importieren Sie sie erneut.',
+    'toc.closeLabel': 'Inhaltsverzeichnis schließen',
+    'settings.closeLabel': 'Einstellungen schließen',
+    'toolbar.pageInputLabel': 'Seitenzahl',
+    'book.titlePlaceholder': 'Titel / Autor (bearbeitbar)',
+    'book.chapterPlaceholder': 'Kapiteltitel',
+    'book.datesPlaceholder': 'Untertitel / Zeitraum (optional)',
+    'settings.customLangPlaceholder': 'Zielsprache eintragen, z. B. Suomi / Tiếng Việt',
+    'import.pastePlaceholder': 'Originaltext hier einfügen…',
+    'app.title': 'Lingua Lector — interaktiver Lesehelfer für fremdsprachige Texte',
+    'settings.langGeneric': 'Allgemein (andere Sprachen in lateinischer Schrift)',
+    'settings.sentenceLangDesc': 'Verhindert, dass Abkürzungen wie „Dr.", „Mr.", „z. B." fälschlich als Satzende erkannt werden. Eine falsche Auswahl ist nicht schlimm — die Trennung ist dann nur gelegentlich weniger präzise.',
+    'settings.outputLangLabel': 'Ausgabesprache der Analyse',
+    'settings.outputLangDesc': 'Satzstruktur und Vokabelerklärung werden in dieser Sprache ausgegeben. „Benutzerdefiniert" wählen, um eine beliebige Sprache einzugeben.',
+    'settings.custom': 'Benutzerdefiniert…',
+    'settings.customLangPlaceholder': 'Zielsprache eingeben, z. B. Suomi / Tiếng Việt',
+    'settings.themeLabel': 'Thema',
+    'settings.themeLight': 'Hell',
+    'settings.themeDark': 'Dunkel',
+    'settings.themeSepia': 'Sepia',
+    'settings.fontLabel': 'Schriftart & -größe',
+    'settings.fontSerif': 'Serif (Standard)',
+    'settings.fontSans': 'Serifenlos',
+    'settings.fontMono': 'Monospace',
+    'settings.fontSizeLabel': 'Größe:',
+    'settings.paginationLabel': 'Seitenaufteilung',
+    'settings.paginationByParagraph': 'Nach Absatzanzahl',
+    'settings.paginationFitHeight': 'Automatisch an Bildschirm anpassen',
+    'settings.paginationNone': 'Keine Seitenaufteilung (lange Seite)',
+    'settings.parasPerPageLabel': 'Absätze pro Seite:',
+    'settings.libraryLabel': 'Gespeicherte Dokumente',
+    'settings.libraryDesc': 'Beim Wechseln des Dokuments werden Sätze nie neu getrennt, und der Cache sowie der Lesefortschritt anderer Dokumente bleiben unberührt.',
+    'settings.libraryBuiltin': 'Integriertes Beispiel',
+    'settings.libraryChapterCount': '{n} Kapitel',
+    'settings.libraryUntitled': 'Unbenanntes Dokument',
+    'settings.libraryDelete': 'Dieses Dokument löschen',
+    'settings.libraryClearCache': 'Analyse-Cache dieses Dokuments leeren',
+    'settings.libraryRestoreExample': 'Beispielbuch wiederherstellen',
+    'settings.chapterLabel': 'Aktuelles Kapitel',
+    'settings.chapterDesc': 'Das integrierte Buch hat 12 Kapitel — beim Wechseln wird zur ersten Seite des Kapitels gesprungen.',
+    'settings.importLabel': 'Text importieren',
+    'settings.importDesc': 'Unterstützt .txt / .docx / .pdf / .epub. Jeder Import wird als neues Dokument oben in der Liste hinzugefügt.',
+    'settings.importDropHint': 'Klicken, um eine Datei zu wählen, oder .txt / .docx / .pdf / .epub hierher ziehen',
+    'settings.pasteLabel': 'Oder Text direkt einfügen / bearbeiten',
+    'settings.pasteDesc': 'Absätze durch eine Leerzeile trennen. „Als neues Dokument speichern“ fügt den Text oben in der Liste hinzu, „Im aktuellen Dokument speichern“ überschreibt das geöffnete Dokument.',
+    'settings.pastePlaceholder': 'Originaltext hier einfügen…',
+    'settings.splitChaptersLabel': 'Versuchen, Überschriften zu erkennen und in Kapitel aufzuteilen (eigenständige kurze Zeilen ohne Satzendezeichen gelten als Kandidaten; funktioniert nach bestem Bemühen, danach manuell anpassbar)',
+    'settings.loadExample': 'Beispieltext laden',
+    'settings.applyText': 'Text übernehmen',
+    'settings.applyTextNew': 'Als neues Dokument speichern',
+    'settings.applyTextUpdate': 'Im aktuellen Dokument speichern',
+    'book.addDateRange': '+ Untertitel/Datumsbereich hinzufügen',
+    'settings.clearCache': 'Analyse-Cache leeren',
+    'settings.save': 'Einstellungen speichern',
+  },
+  fr: {
+    'toolbar.hideSidebar': 'Masquer le panneau',
+    'toolbar.showSidebar': 'Afficher le panneau',
+    'toolbar.toc': '📖 Sommaire',
+    'toolbar.prevPage': '← Précédent',
+    'toolbar.nextPage': 'Suivant →',
+    'toolbar.pagerStatus': 'Page {page} / {total}',
+    'toolbar.pagerPrefix': 'Page ',
+    'toolbar.pagerSuffix': '',
+    'toolbar.openSettings': '⚙ Paramètres',
+    'toolbar.hint': 'Cliquez sur une phrase pour la grammaire & le vocabulaire · ← → pour tourner les pages · Échap pour fermer',
+    'panel.title': 'Analyse de phrase',
+    'panel.closeTitle': 'Réduire le panneau',
+    'panel.emptyMsg': 'Cliquez sur une phrase du texte,<br>sa structure et son vocabulaire s\'afficheront ici.',
+    'panel.loading': 'Analyse de cette phrase…',
+    'panel.retry': 'Réessayer',
+    'panel.reanalyze': 'Réanalyser cette phrase (sans le cache)',
+    'cache.clearedDoc': 'Cache d\'analyse vidé pour « {title} ».',
+    'storage.usage': 'Les documents et les caches occupent {used} (stockés dans {backend}).',
+    'storage.usageLimited': 'Les documents et les caches occupent {used} sur environ {limit} (stockés dans {backend}, que le navigateur plafonne).',
+    'storage.full': 'Le stockage du navigateur est plein ({backend}) : rien n\'a pu être enregistré. Supprimez un document devenu inutile ou videz le cache d\'analyse, puis réessayez.',
+    'storage.writeFailed': 'Échec de l\'écriture dans le stockage du navigateur : {msg}',
+    'cache.cleared': 'Cache d\'analyse vidé pour tous les chapitres de ce document (les autres documents, ainsi que les paramètres et le texte enregistrés, ne sont pas affectés).',
+    'panel.tabGrammar': 'Structure de la phrase',
+    'panel.tabVocab': 'Vocabulaire',
+    'chat.placeholder': 'Poser une question de suivi sur cette phrase…',
+    'chat.send': 'Envoyer',
+    'emptyState.text': 'Aucun texte chargé.<br>Cliquez sur « ⚙ Paramètres » en haut à droite pour importer un fichier .txt / .docx / .pdf, ou collez du texte.',
+    'emptyState.openSettings': 'Ouvrir les paramètres',
+    'book.chapterFallback': 'Chapitre {n}',
+    'errors.noKeyNetworkFail': 'Échec de la requête réseau. Si vous n\'utilisez pas cet outil dans claude.ai, saisissez votre propre clé API dans les paramètres. Si vous êtes bien dans le bac à sable claude.ai, vérifiez votre connexion et réessayez.',
+    'errors.networkFail': 'Échec de la requête : pas de connexion, blocage par une extension du navigateur, ou refus CORS. En cas de CORS, passez à Gemini (sans cette restriction) ou lancez le proxy server.py / Cloudflare Worker décrit dans le README.',
+    'errors.noKeyStatusFail': 'Échec de la requête (statut {status}){detail}. Si vous n\'utilisez pas cet outil dans claude.ai, saisissez votre propre clé API dans les paramètres.',
+    'errors.invalidKey': 'La clé API a été refusée (401/403){detail}. Vérifiez qu’elle est correcte, non expirée et qu’elle correspond au fournisseur sélectionné — coller une clé OpenAI dans le champ Anthropic est la cause la plus fréquente.',
+    'errors.rateLimited': 'Trop de requêtes ou quota atteint (statut 429){detail}',
+    'errors.apiFailed': 'Échec de la requête API (statut {status}){detail}',
+    'errors.emptyResponse': 'Réponse vide, veuillez réessayer',
+    'errors.vocabParseFailed': '(Impossible d\'extraire la section vocabulaire, veuillez réessayer)',
+    'errors.providerKeyRequired': 'Aucune clé API pour {provider} n\'est configurée — ajoutez-en une dans les paramètres et réessayez.',
+    'import.parsing': 'Analyse de {name} …',
+    'import.mammothFail': 'Échec du chargement de mammoth.js — vérifiez votre connexion réseau',
+    'import.pdfjsFail': 'Échec du chargement de pdf.js — vérifiez votre connexion réseau',
+    'import.epubjsFail': 'Échec du chargement de epub.js — vérifiez votre connexion réseau',
+    'import.epubApplied': '{count} chapitres importés depuis {name} (environ {chars} caractères au total), répartis automatiquement selon la table des matières de l\'epub.',
+    'import.pdfApplied': '{count} chapitres importés depuis {name} (environ {chars} caractères au total), répartis automatiquement selon la table des matières intégrée au PDF.',
+    'import.pdfGlyphWarning': ' {count} caractère(s) que la police de ce PDF n\'a pas pu mapper correctement ont aussi été trouvés, marqués comme espaces réservés <code> -- veuillez vérifier/corriger manuellement les emplacements <...> dans le texte.',
+    'import.epubTimeout': 'Délai dépassé lors de l\'analyse de l\'epub — le fichier est peut-être corrompu ou dans un format non pris en charge.',
+    'import.unsupportedType': 'Type de fichier non pris en charge : .{ext}. Formats acceptés : .txt / .docx / .pdf / .epub. Pour .odt / .rtf / .doc, enregistrez d’abord le fichier en .docx dans LibreOffice ou Word.',
+    'import.noText': 'Aucun texte n\'a pu être extrait de ce fichier — il est peut-être vide, ou il s\'agit d\'un PDF scanné (image, sans OCR).',
+    'import.extracted': '{count} caractères extraits de {name}. Vérifiez le texte ci-dessous puis cliquez sur « Enregistrer comme nouveau document » (ou « Enregistrer dans le document actuel » pour écraser celui qui est ouvert).',
+    'import.parseFailed': 'Échec de l\'analyse : {msg}',
+    'import.emptyTextarea': 'La zone de texte est vide — rien à appliquer.',
+    'import.untitledDocument': 'Document sans titre',
+    'import.applied': 'Nouveau texte appliqué : {count} paragraphes{note}.',
+    'import.appliedChapterNote': ', détecté comme {n} chapitres',
+    'import.appliedNew': 'Enregistré comme nouveau document : {count} paragraphes{note}.',
+    'import.appliedUpdate': 'Enregistré dans le document actuel : {count} paragraphes{note}.',
+    'import.loadedExample': 'Texte d\'exemple chargé (Elisabeth von Heyking, « Tagebücher aus vier Weltteilen », livre complet, domaine public).',
+    'toc.title': 'Sommaire',
+    'settings.title': 'Paramètres',
+    'settings.tabAi': 'IA & modèle',
+    'settings.tabLang': 'Langue',
+    'settings.tabAppearance': 'Apparence',
+    'settings.tabDocument': 'Document',
+    'settings.providerLabel': 'Fournisseur IA',
+    'settings.providerDesc': 'Chaque fournisseur conserve sa propre clé / modèle / point d\'accès : changer de fournisseur ne fait pas perdre ce qui a été saisi pour les autres. Toutes les clés sont stockées uniquement dans le stockage local (localStorage) de ce navigateur — cet outil n\'a pas de backend. Ne conservez pas de clé sur un ordinateur partagé/public.',
+    'settings.providerOpenaiCompatible': 'Compatible OpenAI',
+    'settings.anthropicDesc': 'À obtenir sur <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Laissez vide pour supposer que cet outil s\'exécute dans le bac à sable d\'artefact claude.ai (qui a son propre proxy d\'authentification).',
+    'settings.modelLabel': 'Modèle',
+    'settings.baseUrlOptionalLabel': 'Point d\'accès (facultatif, laisser vide pour l\'officiel)',
+    'settings.anthropicWarning': 'ℹ️ Cet outil utilise l\'en-tête <code>anthropic-dangerous-direct-browser-access</code> pour un accès direct depuis le navigateur — normalement sans proxy supplémentaire. Attention cependant : placer une clé directement dans le code frontend/le stockage du navigateur signifie que quiconque a accès aux données du navigateur de cet appareil pourrait théoriquement la récupérer. Ne la conservez pas sur un ordinateur partagé/public, évitez d\'utiliser durablement une clé à quota élevé, et créez plutôt une clé séparée à quota réduit dans la console pour cet usage.',
+    'settings.openaiDesc': 'Fonctionne avec OpenAI lui-même, ainsi qu\'avec tout service compatible exposant le même point d\'accès <code>/chat/completions</code> (DeepSeek, Groq, Ollama en local, etc.) — il suffit d\'indiquer l\'URL de base correspondante ci-dessous.',
+    'settings.baseUrlLabel': 'Point d\'accès (Base URL)',
+    'settings.openaiWarning': 'ℹ️ Certains fournisseurs n\'autorisent pas les appels cross-origin (CORS) directs depuis un navigateur — c\'est généralement la cause d\'une erreur « échec de la requête réseau ». Passez à un fournisseur autorisant l\'accès direct depuis le navigateur, ou mettez en place votre propre proxy compatible CORS.',
+    'settings.geminiDesc': 'À obtenir sur <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.uiLangLabel': 'Langue de l\'interface',
+    'settings.sentenceLangLabel': 'Règles de découpage des phrases (liste d\'abréviations selon la langue)',
+    'import.scannedPdf': 'Ce PDF compte {pages} pages mais n’a pas de couche de texte : c’est un scan (des images de pages). Passez-le d’abord par un OCR (Adobe Acrobat, ABBYY FineReader, ocrmypdf) pour rendre le texte sélectionnable, puis réimportez-le.',
+    'toc.closeLabel': 'Fermer la table des matières',
+    'settings.closeLabel': 'Fermer les réglages',
+    'toolbar.pageInputLabel': 'Numéro de page',
+    'book.titlePlaceholder': 'Titre / auteur (modifiable)',
+    'book.chapterPlaceholder': 'Titre du chapitre',
+    'book.datesPlaceholder': 'Sous-titre / période (facultatif)',
+    'settings.customLangPlaceholder': 'Nom de la langue cible, p. ex. Suomi / Tiếng Việt',
+    'import.pastePlaceholder': 'Collez le texte source ici…',
+    'app.title': 'Lingua Lector — lecture rapprochée interactive de textes en langue étrangère',
+    'settings.langGeneric': 'Générique (autres langues en alphabet latin)',
+    'settings.sentenceLangDesc': 'Évite que des abréviations comme « Dr. », « Mr. », « z. B. » soient prises à tort pour une fin de phrase. Un mauvais choix n\'est pas grave — le découpage est juste occasionnellement moins précis.',
+    'settings.outputLangLabel': 'Langue de sortie de l\'analyse',
+    'settings.outputLangDesc': 'La structure de la phrase et le vocabulaire seront rédigés dans cette langue. Choisissez « Personnalisé » pour saisir n\'importe quelle langue.',
+    'settings.custom': 'Personnalisé…',
+    'settings.customLangPlaceholder': 'Saisissez une langue cible, ex. Suomi / Tiếng Việt',
+    'settings.themeLabel': 'Thème',
+    'settings.themeLight': 'Clair',
+    'settings.themeDark': 'Sombre',
+    'settings.themeSepia': 'Sépia',
+    'settings.fontLabel': 'Police et taille de lecture',
+    'settings.fontSerif': 'Serif (par défaut)',
+    'settings.fontSans': 'Sans-serif',
+    'settings.fontMono': 'Monospace',
+    'settings.fontSizeLabel': 'Taille :',
+    'settings.paginationLabel': 'Pagination',
+    'settings.paginationByParagraph': 'Par nombre de paragraphes',
+    'settings.paginationFitHeight': 'Adapter à l\'écran (une page = un écran)',
+    'settings.paginationNone': 'Sans pagination (page longue)',
+    'settings.parasPerPageLabel': 'Paragraphes par page :',
+    'settings.libraryLabel': 'Documents enregistrés',
+    'settings.libraryDesc': 'Changer de document ne redécoupe jamais les phrases et n\'affecte jamais le cache d\'analyse ni la progression de lecture d\'un autre document.',
+    'settings.libraryBuiltin': 'Exemple intégré',
+    'settings.libraryChapterCount': '{n} chapitres',
+    'settings.libraryUntitled': 'Document sans titre',
+    'settings.libraryDelete': 'Supprimer ce document',
+    'settings.libraryClearCache': 'Vider le cache d\'analyse de ce document',
+    'settings.libraryRestoreExample': 'Restaurer le livre d\'exemple intégré',
+    'settings.chapterLabel': 'Chapitre actuel',
+    'settings.chapterDesc': 'Le livre intégré comporte 12 chapitres — changer de chapitre saute à sa première page.',
+    'settings.importLabel': 'Importer du texte',
+    'settings.importDesc': 'Prend en charge .txt / .docx / .pdf / .epub. Chaque import est ajouté comme nouveau document dans la liste ci-dessus.',
+    'settings.importDropHint': 'Cliquez pour choisir un fichier, ou glissez un .txt / .docx / .pdf / .epub ici',
+    'settings.pasteLabel': 'Ou collez / modifiez le texte directement',
+    'settings.pasteDesc': 'Séparez les paragraphes par une ligne vide. « Enregistrer comme nouveau document » l\'ajoute à la liste ci-dessus ; « Enregistrer dans le document actuel » écrase celui qui est ouvert.',
+    'settings.pastePlaceholder': 'Collez le texte source ici…',
+    'settings.splitChaptersLabel': 'Essayer de détecter les titres et de les répartir en chapitres (les lignes courtes isolées ne se terminant pas par une ponctuation de fin de phrase sont considérées comme des candidats ; fonctionne au mieux, ajustable manuellement ensuite)',
+    'settings.loadExample': 'Charger le texte d\'exemple',
+    'settings.applyText': 'Appliquer le texte',
+    'settings.applyTextNew': 'Enregistrer comme nouveau document',
+    'settings.applyTextUpdate': 'Enregistrer dans le document actuel',
+    'book.addDateRange': '+ Ajouter un sous-titre/une période',
+    'settings.clearCache': 'Vider le cache d\'analyse',
+    'settings.save': 'Enregistrer les paramètres',
+  },
+  es: {
+    'toolbar.hideSidebar': 'Ocultar panel',
+    'toolbar.showSidebar': 'Mostrar panel',
+    'toolbar.toc': '📖 Índice',
+    'toolbar.prevPage': '← Anterior',
+    'toolbar.nextPage': 'Siguiente →',
+    'toolbar.pagerStatus': 'Página {page} / {total}',
+    'toolbar.pagerPrefix': 'Página ',
+    'toolbar.pagerSuffix': '',
+    'toolbar.openSettings': '⚙ Configuración',
+    'toolbar.hint': 'Haz clic en una frase para ver gramática y vocabulario · ← → para pasar página · Esc para cerrar',
+    'panel.title': 'Análisis de la frase',
+    'panel.closeTitle': 'Contraer panel',
+    'panel.emptyMsg': 'Haz clic en cualquier frase del texto<br>y aquí aparecerá su estructura y vocabulario.',
+    'panel.loading': 'Analizando esta frase…',
+    'panel.retry': 'Reintentar',
+    'panel.reanalyze': 'Volver a analizar esta oración (sin caché)',
+    'cache.clearedDoc': 'Se vació la caché de análisis de «{title}».',
+    'storage.usage': 'Los documentos y las cachés ocupan {used} (guardados en {backend}).',
+    'storage.usageLimited': 'Los documentos y las cachés ocupan {used} de unos {limit} (guardados en {backend}, que el navegador limita).',
+    'storage.full': 'El almacenamiento del navegador está lleno ({backend}) y no se pudo guardar. Elimina un documento que ya no necesites o vacía la caché de análisis y vuelve a intentarlo.',
+    'storage.writeFailed': 'Error al escribir en el almacenamiento del navegador: {msg}',
+    'cache.cleared': 'Se vació la caché de análisis de todos los capítulos de este documento (no afecta a otros documentos ni a la configuración o el texto guardados).',
+    'panel.tabGrammar': 'Estructura de la oración',
+    'panel.tabVocab': 'Vocabulario',
+    'chat.placeholder': 'Haz una pregunta de seguimiento sobre esta frase…',
+    'chat.send': 'Enviar',
+    'emptyState.text': 'Todavía no se ha cargado ningún texto.<br>Haz clic en «⚙ Configuración» arriba a la derecha para importar un archivo .txt / .docx / .pdf, o pega el texto.',
+    'emptyState.openSettings': 'Abrir configuración',
+    'book.chapterFallback': 'Capítulo {n}',
+    'errors.noKeyNetworkFail': 'Fallo en la solicitud de red. Si no estás usando esta herramienta dentro de claude.ai, introduce tu propia clave API en Configuración. Si sí estás en el sandbox de claude.ai, comprueba tu conexión e inténtalo de nuevo.',
+    'errors.networkFail': 'La solicitud falló: sin conexión, bloqueada por una extensión del navegador o rechazada por CORS. Si es CORS, cambia a Gemini (que no tiene esa restricción) o usa el proxy server.py / Cloudflare Worker descrito en el README.',
+    'errors.noKeyStatusFail': 'Solicitud fallida (estado {status}){detail}. Si no estás usando esta herramienta dentro de claude.ai, introduce tu propia clave API en Configuración.',
+    'errors.invalidKey': 'La clave API fue rechazada (401/403){detail}. Comprueba que sea correcta, que no haya caducado y que corresponda al proveedor seleccionado: pegar una clave de OpenAI en el campo de Anthropic es la causa más común.',
+    'errors.rateLimited': 'Demasiadas solicitudes o límite de uso alcanzado (estado 429){detail}',
+    'errors.apiFailed': 'Solicitud a la API fallida (estado {status}){detail}',
+    'errors.emptyResponse': 'Respuesta vacía, inténtalo de nuevo',
+    'errors.vocabParseFailed': '(No se pudo extraer la sección de vocabulario, inténtalo de nuevo)',
+    'errors.providerKeyRequired': 'Todavía no hay una clave API de {provider} — añade una en Configuración e inténtalo de nuevo.',
+    'import.parsing': 'Analizando {name} …',
+    'import.mammothFail': 'No se pudo cargar mammoth.js — comprueba tu conexión de red',
+    'import.pdfjsFail': 'No se pudo cargar pdf.js — comprueba tu conexión de red',
+    'import.epubjsFail': 'No se pudo cargar epub.js — comprueba tu conexión de red',
+    'import.epubApplied': 'Se importaron {count} capítulos desde {name} (unos {chars} caracteres en total), divididos automáticamente según el índice propio del epub.',
+    'import.pdfApplied': 'Se importaron {count} capítulos desde {name} (unos {chars} caracteres en total), divididos automáticamente según el índice incorporado del PDF.',
+    'import.pdfGlyphWarning': ' También se encontraron {count} caracteres que la fuente de este PDF no pudo asignar correctamente, marcados como marcadores <código> -- revisa y corrige manualmente los lugares <...> del texto.',
+    'import.epubTimeout': 'Tiempo de espera agotado al analizar el epub — el archivo puede estar dañado o en un formato no compatible.',
+    'import.unsupportedType': 'Tipo de archivo no admitido: .{ext}. Se admiten .txt / .docx / .pdf / .epub. Para .odt / .rtf / .doc, guarda antes el archivo como .docx en LibreOffice o Word.',
+    'import.noText': 'No se pudo extraer texto de este archivo — puede estar vacío o ser un PDF escaneado (imagen, sin OCR).',
+    'import.extracted': 'Se extrajeron {count} caracteres de {name}. Revisa el texto de abajo y haz clic en "Guardar como nuevo documento" (o "Guardar en el documento actual" para sobrescribir el abierto).',
+    'import.parseFailed': 'Error al analizar: {msg}',
+    'import.emptyTextarea': 'El cuadro de texto está vacío — no hay nada que aplicar.',
+    'import.untitledDocument': 'Documento sin título',
+    'import.applied': 'Nuevo texto aplicado: {count} párrafos{note}.',
+    'import.appliedChapterNote': ', detectado como {n} capítulos',
+    'import.appliedNew': 'Guardado como nuevo documento: {count} párrafos{note}.',
+    'import.appliedUpdate': 'Guardado en el documento actual: {count} párrafos{note}.',
+    'import.loadedExample': 'Texto de ejemplo cargado (Elisabeth von Heyking, «Tagebücher aus vier Weltteilen», libro completo, dominio público).',
+    'toc.title': 'Índice',
+    'settings.title': 'Configuración',
+    'settings.tabAi': 'IA y modelo',
+    'settings.tabLang': 'Idioma',
+    'settings.tabAppearance': 'Apariencia',
+    'settings.tabDocument': 'Documento',
+    'settings.providerLabel': 'Proveedor de IA',
+    'settings.providerDesc': 'Cada proveedor guarda su propia clave / modelo / endpoint por separado: cambiar de proveedor no borra lo que hayas introducido en los demás. Todas las claves se guardan solo en el almacenamiento local (localStorage) de este navegador — esta herramienta no tiene backend. No guardes claves en un ordenador compartido/público.',
+    'settings.providerOpenaiCompatible': 'Compatible con OpenAI',
+    'settings.anthropicDesc': 'Consíguela en <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Déjalo en blanco para suponer que esta herramienta se ejecuta dentro del sandbox de artefactos de claude.ai (que tiene su propio proxy de autenticación).',
+    'settings.modelLabel': 'Modelo',
+    'settings.baseUrlOptionalLabel': 'Endpoint (opcional, déjalo en blanco para el oficial)',
+    'settings.anthropicWarning': 'ℹ️ Esta herramienta usa la cabecera <code>anthropic-dangerous-direct-browser-access</code> para el acceso directo desde el navegador — normalmente sin necesidad de un proxy adicional. Ten en cuenta: poner una clave directamente en el código frontend/almacenamiento del navegador significa que cualquiera con acceso a los datos del navegador de este dispositivo podría, en teoría, obtenerla. No la guardes en un ordenador compartido/público, evita usar a largo plazo una clave con límite alto, y considera crear una clave aparte con un límite más bajo en la consola solo para esto.',
+    'settings.openaiDesc': 'Funciona con OpenAI directamente, y con cualquier servicio compatible que exponga el mismo endpoint <code>/chat/completions</code> (DeepSeek, Groq, Ollama local, etc.) — simplemente apunta la URL base de abajo a ese servicio.',
+    'settings.baseUrlLabel': 'Endpoint (Base URL)',
+    'settings.openaiWarning': 'ℹ️ Algunos proveedores no permiten llamadas directas entre orígenes (CORS) desde el navegador — normalmente esa es la causa de un error de "fallo en la solicitud de red". Cambia a un proveedor que permita acceso directo desde el navegador, o configura tu propio proxy compatible con CORS.',
+    'settings.geminiDesc': 'Consíguela en <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.uiLangLabel': 'Idioma de la interfaz',
+    'settings.sentenceLangLabel': 'Reglas de división de frases (la lista de abreviaturas varía según el idioma)',
+    'import.scannedPdf': 'Este PDF tiene {pages} páginas pero no capa de texto: es un escaneo (imágenes de las páginas). Pásalo primero por un OCR (Adobe Acrobat, ABBYY FineReader, ocrmypdf) para que el texto sea seleccionable y vuelve a importarlo.',
+    'toc.closeLabel': 'Cerrar el índice',
+    'settings.closeLabel': 'Cerrar ajustes',
+    'toolbar.pageInputLabel': 'Número de página',
+    'book.titlePlaceholder': 'Título / autor (editable)',
+    'book.chapterPlaceholder': 'Título del capítulo',
+    'book.datesPlaceholder': 'Subtítulo / periodo (opcional)',
+    'settings.customLangPlaceholder': 'Nombre del idioma de destino, p. ej. Suomi / Tiếng Việt',
+    'import.pastePlaceholder': 'Pega aquí el texto original…',
+    'app.title': 'Lingua Lector — lectura detallada interactiva de textos en lengua extranjera',
+    'settings.langGeneric': 'Genérico (otras lenguas en alfabeto latino)',
+    'settings.sentenceLangDesc': 'Evita que abreviaturas como "Dr.", "Mr.", "z. B." se confundan con el final de una frase. Elegir la incorrecta no es grave — la división será solo ocasionalmente menos precisa.',
+    'settings.outputLangLabel': 'Idioma de salida del análisis',
+    'settings.outputLangDesc': 'La estructura de la oración y el vocabulario se redactarán en este idioma. Elige "Personalizado" para introducir cualquier idioma.',
+    'settings.custom': 'Personalizado…',
+    'settings.customLangPlaceholder': 'Introduce un idioma de destino, p. ej. Suomi / Tiếng Việt',
+    'settings.themeLabel': 'Tema',
+    'settings.themeLight': 'Claro',
+    'settings.themeDark': 'Oscuro',
+    'settings.themeSepia': 'Sepia',
+    'settings.fontLabel': 'Fuente y tamaño de lectura',
+    'settings.fontSerif': 'Serif (predeterminado)',
+    'settings.fontSans': 'Sans-serif',
+    'settings.fontMono': 'Monoespaciada',
+    'settings.fontSizeLabel': 'Tamaño:',
+    'settings.paginationLabel': 'Paginación',
+    'settings.paginationByParagraph': 'Por número de párrafos',
+    'settings.paginationFitHeight': 'Ajustar a una pantalla por página',
+    'settings.paginationNone': 'Sin paginación (página larga)',
+    'settings.parasPerPageLabel': 'Párrafos por página:',
+    'settings.libraryLabel': 'Documentos guardados',
+    'settings.libraryDesc': 'Cambiar de documento nunca vuelve a dividir las frases ni afecta a la caché de análisis o al progreso de lectura de otros documentos.',
+    'settings.libraryBuiltin': 'Ejemplo incluido',
+    'settings.libraryChapterCount': '{n} capítulos',
+    'settings.libraryUntitled': 'Documento sin título',
+    'settings.libraryDelete': 'Eliminar este documento',
+    'settings.libraryClearCache': 'Vaciar la caché de análisis de este documento',
+    'settings.libraryRestoreExample': 'Restaurar el libro de ejemplo integrado',
+    'settings.chapterLabel': 'Capítulo actual',
+    'settings.chapterDesc': 'El libro incluido tiene 12 capítulos — al cambiar saltarás a la primera página de ese capítulo.',
+    'settings.importLabel': 'Importar texto',
+    'settings.importDesc': 'Admite .txt / .docx / .pdf / .epub. Cada importación se añade como un nuevo documento a la lista de arriba.',
+    'settings.importDropHint': 'Haz clic para elegir un archivo, o arrastra aquí un .txt / .docx / .pdf / .epub',
+    'settings.pasteLabel': 'O pega / edita el texto directamente',
+    'settings.pasteDesc': 'Separa los párrafos con una línea en blanco. "Guardar como nuevo documento" lo añade a la lista de arriba; "Guardar en el documento actual" sobrescribe el que está abierto.',
+    'settings.pastePlaceholder': 'Pega aquí el texto original…',
+    'settings.splitChaptersLabel': 'Intentar detectar títulos y dividir en capítulos (las líneas cortas independientes que no terminan en puntuación de fin de frase se consideran candidatas; funciona de forma orientativa, se puede ajustar manualmente después)',
+    'settings.loadExample': 'Cargar texto de ejemplo',
+    'settings.applyText': 'Aplicar texto',
+    'settings.applyTextNew': 'Guardar como nuevo documento',
+    'settings.applyTextUpdate': 'Guardar en el documento actual',
+    'book.addDateRange': '+ Añadir subtítulo/rango de fechas',
+    'settings.clearCache': 'Vaciar caché de análisis',
+    'settings.save': 'Guardar configuración',
+  },
+  it: {
+    'toolbar.hideSidebar': 'Nascondi pannello',
+    'toolbar.showSidebar': 'Mostra pannello',
+    'toolbar.toc': '📖 Indice',
+    'toolbar.prevPage': '← Precedente',
+    'toolbar.nextPage': 'Successiva →',
+    'toolbar.pagerStatus': 'Pagina {page} / {total}',
+    'toolbar.pagerPrefix': 'Pagina ',
+    'toolbar.pagerSuffix': '',
+    'toolbar.openSettings': '⚙ Impostazioni',
+    'toolbar.hint': 'Clicca su una frase per grammatica e vocabolario · ← → per cambiare pagina · Esc per chiudere',
+    'panel.title': 'Analisi della frase',
+    'panel.closeTitle': 'Comprimi pannello',
+    'panel.emptyMsg': 'Clicca su una frase qualsiasi del testo,<br>qui compariranno struttura e vocabolario.',
+    'panel.loading': 'Analisi della frase in corso…',
+    'panel.retry': 'Riprova',
+    'panel.reanalyze': 'Rianalizza questa frase (senza cache)',
+    'cache.clearedDoc': 'Cache di analisi svuotata per «{title}».',
+    'storage.usage': 'Documenti e cache occupano {used} (salvati in {backend}).',
+    'storage.usageLimited': 'Documenti e cache occupano {used} su circa {limit} (salvati in {backend}, che il browser limita).',
+    'storage.full': 'L\'archiviazione del browser è piena ({backend}) e non è stato possibile salvare. Elimina un documento che non ti serve più oppure svuota la cache di analisi e riprova.',
+    'storage.writeFailed': 'Scrittura nell\'archiviazione del browser non riuscita: {msg}',
+    'cache.cleared': 'Cache di analisi svuotata per tutti i capitoli di questo documento (altri documenti, impostazioni e testo salvati non sono interessati).',
+    'panel.tabGrammar': 'Struttura della frase',
+    'panel.tabVocab': 'Vocabolario',
+    'chat.placeholder': 'Fai una domanda su questa frase…',
+    'chat.send': 'Invia',
+    'emptyState.text': 'Nessun testo caricato.<br>Clicca su "⚙ Impostazioni" in alto a destra per importare un file .txt / .docx / .pdf, oppure incolla il testo.',
+    'emptyState.openSettings': 'Apri impostazioni',
+    'book.chapterFallback': 'Capitolo {n}',
+    'errors.noKeyNetworkFail': 'Richiesta di rete non riuscita. Se non stai usando questo strumento dentro claude.ai, inserisci la tua API key nelle impostazioni. Se sei davvero nella sandbox di claude.ai, controlla la connessione e riprova.',
+    'errors.networkFail': 'Richiesta non riuscita: nessuna connessione, bloccata da un’estensione del browser o rifiutata da CORS. Se è CORS, passa a Gemini (che non ha questa limitazione) oppure usa il proxy server.py / Cloudflare Worker descritto nel README.',
+    'errors.noKeyStatusFail': 'Richiesta non riuscita (stato {status}){detail}. Se non stai usando questo strumento dentro claude.ai, inserisci la tua API key nelle impostazioni.',
+    'errors.invalidKey': 'La chiave API è stata rifiutata (401/403){detail}. Verifica che sia corretta, non scaduta e che appartenga al provider selezionato: incollare una chiave OpenAI nel campo Anthropic è la causa più comune.',
+    'errors.rateLimited': 'Troppe richieste o limite di utilizzo raggiunto (stato 429){detail}',
+    'errors.apiFailed': 'Richiesta API non riuscita (stato {status}){detail}',
+    'errors.emptyResponse': 'Risposta vuota, riprova',
+    'errors.vocabParseFailed': '(Impossibile estrarre la sezione vocabolario, riprova)',
+    'errors.providerKeyRequired': 'Nessuna API key impostata per {provider} — aggiungine una nelle impostazioni e riprova.',
+    'import.parsing': 'Analisi di {name} in corso…',
+    'import.mammothFail': 'Impossibile caricare mammoth.js — controlla la connessione di rete',
+    'import.pdfjsFail': 'Impossibile caricare pdf.js — controlla la connessione di rete',
+    'import.epubjsFail': 'Impossibile caricare epub.js — controlla la connessione di rete',
+    'import.epubApplied': 'Importati {count} capitoli da {name} (circa {chars} caratteri in totale), suddivisi automaticamente in base all\'indice dell\'epub.',
+    'import.pdfApplied': 'Importati {count} capitoli da {name} (circa {chars} caratteri in totale), suddivisi automaticamente in base all\'indice incorporato nel PDF.',
+    'import.pdfGlyphWarning': ' Sono stati trovati anche {count} caratteri che il font di questo PDF non è riuscito a mappare correttamente, contrassegnati come segnaposto <codice> -- controlla e correggi manualmente i punti <...> nel testo.',
+    'import.epubTimeout': 'Tempo scaduto durante l\'analisi dell\'epub — il file potrebbe essere danneggiato o in un formato non supportato.',
+    'import.unsupportedType': 'Tipo di file non supportato: .{ext}. Supportati: .txt / .docx / .pdf / .epub. Per .odt / .rtf / .doc, salva prima il file come .docx in LibreOffice o Word.',
+    'import.noText': 'Impossibile estrarre testo da questo file — potrebbe essere vuoto o un PDF scansionato (immagine, senza OCR).',
+    'import.extracted': 'Estratti {count} caratteri da {name}. Controlla il testo qui sotto e clicca su "Salva come nuovo documento" (o "Salva nel documento corrente" per sovrascrivere quello aperto).',
+    'import.parseFailed': 'Analisi non riuscita: {msg}',
+    'import.emptyTextarea': 'Il campo di testo è vuoto — niente da applicare.',
+    'import.untitledDocument': 'Documento senza titolo',
+    'import.applied': 'Nuovo testo applicato: {count} paragrafi{note}.',
+    'import.appliedChapterNote': ', rilevati come {n} capitoli',
+    'import.appliedNew': 'Salvato come nuovo documento: {count} paragrafi{note}.',
+    'import.appliedUpdate': 'Salvato nel documento corrente: {count} paragrafi{note}.',
+    'import.loadedExample': 'Testo di esempio caricato (Elisabeth von Heyking, "Tagebücher aus vier Weltteilen", libro completo, di pubblico dominio).',
+    'toc.title': 'Indice',
+    'settings.title': 'Impostazioni',
+    'settings.tabAi': 'IA e modello',
+    'settings.tabLang': 'Lingua',
+    'settings.tabAppearance': 'Aspetto',
+    'settings.tabDocument': 'Documento',
+    'settings.providerLabel': 'Provider IA',
+    'settings.providerDesc': 'Ogni provider salva key / modello / endpoint separatamente: cambiare provider non fa perdere quanto inserito per gli altri. Tutte le key sono salvate solo nell\'archiviazione locale (localStorage) di questo browser — questo strumento non ha un backend. Non salvare le key su un computer condiviso/pubblico.',
+    'settings.providerOpenaiCompatible': 'Compatibile OpenAI',
+    'settings.anthropicDesc': 'Ottienila su <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Lascia vuoto per assumere che questo strumento sia in esecuzione nella sandbox artifact di claude.ai (che ha un proprio proxy di autenticazione).',
+    'settings.modelLabel': 'Modello',
+    'settings.baseUrlOptionalLabel': 'Endpoint (opzionale, lascia vuoto per quello ufficiale)',
+    'settings.anthropicWarning': 'ℹ️ Questo strumento usa l\'header <code>anthropic-dangerous-direct-browser-access</code> per l\'accesso diretto dal browser — normalmente senza bisogno di un proxy aggiuntivo. Attenzione però: inserire una key direttamente nel codice frontend/archiviazione del browser significa che chiunque abbia accesso ai dati del browser di questo dispositivo potrebbe teoricamente recuperarla. Non salvarla su un computer condiviso/pubblico, evita l\'uso prolungato di una key con limite alto, e valuta di crearne una separata con limite più basso nella console solo per questo scopo.',
+    'settings.openaiDesc': 'Funziona con OpenAI stesso, e con qualsiasi servizio compatibile che esponga lo stesso endpoint <code>/chat/completions</code> (DeepSeek, Groq, Ollama locale, ecc.) — basta puntare l\'URL base qui sotto a quel servizio.',
+    'settings.baseUrlLabel': 'Endpoint (Base URL)',
+    'settings.openaiWarning': 'ℹ️ Alcuni provider non consentono chiamate cross-origin (CORS) dirette dal browser — di solito è questa la causa di un errore "richiesta di rete non riuscita". Passa a un provider che consenta l\'accesso diretto dal browser, oppure configura un tuo proxy compatibile con CORS.',
+    'settings.geminiDesc': 'Ottienila su <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.uiLangLabel': 'Lingua dell\'interfaccia',
+    'settings.sentenceLangLabel': 'Regole di suddivisione delle frasi (elenco abbreviazioni diverso per lingua)',
+    'import.scannedPdf': 'Questo PDF ha {pages} pagine ma nessun livello di testo: è una scansione (immagini delle pagine). Passalo prima per un OCR (Adobe Acrobat, ABBYY FineReader, ocrmypdf) così il testo diventa selezionabile, poi reimportalo.',
+    'toc.closeLabel': 'Chiudi il sommario',
+    'settings.closeLabel': 'Chiudi impostazioni',
+    'toolbar.pageInputLabel': 'Numero di pagina',
+    'book.titlePlaceholder': 'Titolo / autore (modificabile)',
+    'book.chapterPlaceholder': 'Titolo del capitolo',
+    'book.datesPlaceholder': 'Sottotitolo / periodo (facoltativo)',
+    'settings.customLangPlaceholder': 'Nome della lingua di destinazione, es. Suomi / Tiếng Việt',
+    'import.pastePlaceholder': 'Incolla qui il testo originale…',
+    'app.title': 'Lingua Lector — lettura ravvicinata interattiva di testi in lingua straniera',
+    'settings.langGeneric': 'Generico (altre lingue in alfabeto latino)',
+    'settings.sentenceLangDesc': 'Evita che abbreviazioni come "Dr.", "Mr.", "z. B." vengano scambiate per la fine di una frase. Una scelta sbagliata non è grave — la suddivisione sarà solo occasionalmente meno precisa.',
+    'settings.outputLangLabel': 'Lingua di output dell\'analisi',
+    'settings.outputLangDesc': 'La struttura della frase e il vocabolario saranno scritti in questa lingua. Scegli "Personalizzata" per inserire qualsiasi lingua.',
+    'settings.custom': 'Personalizzata…',
+    'settings.customLangPlaceholder': 'Inserisci una lingua di destinazione, es. Suomi / Tiếng Việt',
+    'settings.themeLabel': 'Tema',
+    'settings.themeLight': 'Chiaro',
+    'settings.themeDark': 'Scuro',
+    'settings.themeSepia': 'Seppia',
+    'settings.fontLabel': 'Carattere e dimensione di lettura',
+    'settings.fontSerif': 'Serif (predefinito)',
+    'settings.fontSans': 'Senza grazie',
+    'settings.fontMono': 'Monospazio',
+    'settings.fontSizeLabel': 'Dimensione:',
+    'settings.paginationLabel': 'Impaginazione',
+    'settings.paginationByParagraph': 'Per numero di paragrafi',
+    'settings.paginationFitHeight': 'Adatta a una schermata per pagina',
+    'settings.paginationNone': 'Nessuna impaginazione (pagina lunga)',
+    'settings.parasPerPageLabel': 'Paragrafi per pagina:',
+    'settings.libraryLabel': 'Documenti salvati',
+    'settings.libraryDesc': 'Cambiare documento non ridivide mai le frasi e non tocca mai la cache di analisi o il progresso di lettura di un altro documento.',
+    'settings.libraryBuiltin': 'Esempio integrato',
+    'settings.libraryChapterCount': '{n} capitoli',
+    'settings.libraryUntitled': 'Documento senza titolo',
+    'settings.libraryDelete': 'Elimina questo documento',
+    'settings.libraryClearCache': 'Svuota la cache di analisi di questo documento',
+    'settings.libraryRestoreExample': 'Ripristina il libro di esempio integrato',
+    'settings.chapterLabel': 'Capitolo corrente',
+    'settings.chapterDesc': 'Il libro integrato ha 12 capitoli — cambiando si salta alla prima pagina di quel capitolo.',
+    'settings.importLabel': 'Importa testo',
+    'settings.importDesc': 'Supporta .txt / .docx / .pdf / .epub. Ogni importazione viene aggiunta come nuovo documento nell\'elenco sopra.',
+    'settings.importDropHint': 'Clicca per scegliere un file, oppure trascina qui un .txt / .docx / .pdf / .epub',
+    'settings.pasteLabel': 'Oppure incolla / modifica il testo direttamente',
+    'settings.pasteDesc': 'Separa i paragrafi con una riga vuota. "Salva come nuovo documento" lo aggiunge all\'elenco sopra; "Salva nel documento corrente" sovrascrive quello aperto.',
+    'settings.pastePlaceholder': 'Incolla qui il testo originale…',
+    'settings.splitChaptersLabel': 'Prova a rilevare i titoli e a suddividere in capitoli (righe brevi isolate che non terminano con punteggiatura di fine frase sono considerate candidate; funziona in modo approssimativo, regolabile manualmente dopo)',
+    'settings.loadExample': 'Carica testo di esempio',
+    'settings.applyText': 'Applica testo',
+    'settings.applyTextNew': 'Salva come nuovo documento',
+    'settings.applyTextUpdate': 'Salva nel documento corrente',
+    'book.addDateRange': '+ Aggiungi sottotitolo/intervallo di date',
+    'settings.clearCache': 'Svuota cache di analisi',
+    'settings.save': 'Salva impostazioni',
+  },
+  ru: {
+    'toolbar.hideSidebar': 'Скрыть панель',
+    'toolbar.showSidebar': 'Показать панель',
+    'toolbar.toc': '📖 Содержание',
+    'toolbar.prevPage': '← Назад',
+    'toolbar.nextPage': 'Вперёд →',
+    'toolbar.pagerStatus': 'Стр. {page} / {total}',
+    'toolbar.pagerPrefix': 'Стр. ',
+    'toolbar.pagerSuffix': '',
+    'toolbar.openSettings': '⚙ Настройки',
+    'toolbar.hint': 'Нажмите на предложение для разбора грамматики и лексики · ← → для листания · Esc для закрытия',
+    'panel.title': 'Разбор предложения',
+    'panel.closeTitle': 'Свернуть панель',
+    'panel.emptyMsg': 'Нажмите на любое предложение в тексте —<br>здесь появится разбор структуры и лексики.',
+    'panel.loading': 'Анализ предложения…',
+    'panel.retry': 'Повторить',
+    'panel.reanalyze': 'Разобрать это предложение заново (без кэша)',
+    'cache.clearedDoc': 'Кэш разбора для «{title}» очищен.',
+    'storage.usage': 'Документы и кэш занимают {used} (хранилище: {backend}).',
+    'storage.usageLimited': 'Документы и кэш занимают {used} из примерно {limit} (хранилище: {backend}, браузер ограничивает его размер).',
+    'storage.full': 'Хранилище браузера переполнено ({backend}), сохранить не удалось. Удалите ненужный документ или очистите кэш разбора и повторите попытку.',
+    'storage.writeFailed': 'Не удалось записать в хранилище браузера: {msg}',
+    'cache.cleared': 'Кэш разбора очищен для всех глав этого документа (другие документы, сохранённые настройки и текст не затронуты).',
+    'panel.tabGrammar': 'Структура предложения',
+    'panel.tabVocab': 'Лексика',
+    'chat.placeholder': 'Задать уточняющий вопрос по этому предложению…',
+    'chat.send': 'Отправить',
+    'emptyState.text': 'Текст ещё не загружен.<br>Нажмите «⚙ Настройки» справа вверху, чтобы импортировать файл .txt / .docx / .pdf, или вставьте текст.',
+    'emptyState.openSettings': 'Открыть настройки',
+    'book.chapterFallback': 'Глава {n}',
+    'errors.noKeyNetworkFail': 'Сетевой запрос не удался. Если вы используете инструмент не внутри claude.ai, введите свой API-ключ в настройках. Если вы всё же в песочнице claude.ai, проверьте соединение и повторите попытку.',
+    'errors.networkFail': 'Запрос не удался: нет соединения, его заблокировало расширение браузера или отклонил CORS. Если дело в CORS, переключитесь на Gemini (там такого ограничения нет) или запустите прокси server.py / Cloudflare Worker, описанный в README.',
+    'errors.noKeyStatusFail': 'Запрос не удался (статус {status}){detail}. Если вы используете инструмент не внутри claude.ai, введите свой API-ключ в настройках.',
+    'errors.invalidKey': 'Ключ API отклонён (401/403){detail}. Проверьте, что он верен, не истёк и относится к выбранному провайдеру — ключ OpenAI в поле Anthropic самая частая причина.',
+    'errors.rateLimited': 'Слишком много запросов или исчерпан лимит использования (статус 429){detail}',
+    'errors.apiFailed': 'Запрос к API не удался (статус {status}){detail}',
+    'errors.emptyResponse': 'Пустой ответ, попробуйте ещё раз',
+    'errors.vocabParseFailed': '(Не удалось распознать раздел лексики, попробуйте ещё раз)',
+    'errors.providerKeyRequired': 'API-ключ для {provider} ещё не указан — добавьте его в настройках и повторите попытку.',
+    'import.parsing': 'Разбор {name} …',
+    'import.mammothFail': 'Не удалось загрузить mammoth.js — проверьте подключение к сети',
+    'import.pdfjsFail': 'Не удалось загрузить pdf.js — проверьте подключение к сети',
+    'import.epubjsFail': 'Не удалось загрузить epub.js — проверьте подключение к сети',
+    'import.epubApplied': 'Импортировано {count} глав из {name} (около {chars} символов всего), автоматически разбито по оглавлению epub.',
+    'import.pdfApplied': 'Импортировано {count} глав из {name} (около {chars} символов всего), автоматически разбито по встроенному оглавлению PDF.',
+    'import.pdfGlyphWarning': ' Также найдено {count} символ(ов), которые шрифт этого PDF не смог корректно сопоставить, они помечены как <код> -- проверьте и вручную исправьте места <...> в тексте.',
+    'import.epubTimeout': 'Превышено время ожидания при разборе epub — файл может быть повреждён или иметь неподдерживаемый формат.',
+    'import.unsupportedType': 'Неподдерживаемый тип файла: .{ext}. Поддерживаются .txt / .docx / .pdf / .epub. Форматы вроде .odt / .rtf / .doc сначала сохраните как .docx в LibreOffice или Word.',
+    'import.noText': 'Не удалось извлечь текст из файла — возможно, он пуст или это отсканированный PDF (изображение, без OCR).',
+    'import.extracted': 'Извлечено {count} символов из {name}. Проверьте текст ниже и нажмите «Сохранить как новый документ» (или «Сохранить в текущий документ», чтобы перезаписать открытый).',
+    'import.parseFailed': 'Ошибка разбора: {msg}',
+    'import.emptyTextarea': 'Текстовое поле пусто — нечего применять.',
+    'import.untitledDocument': 'Документ без названия',
+    'import.applied': 'Новый текст применён: {count} абзацев{note}.',
+    'import.appliedChapterNote': ', определено как {n} глав',
+    'import.appliedNew': 'Сохранено как новый документ: {count} абзацев{note}.',
+    'import.appliedUpdate': 'Сохранено в текущий документ: {count} абзацев{note}.',
+    'import.loadedExample': 'Загружен пример текста (Elisabeth von Heyking, «Tagebücher aus vier Weltteilen», полная книга, общественное достояние).',
+    'toc.title': 'Содержание',
+    'settings.title': 'Настройки',
+    'settings.tabAi': 'ИИ и модель',
+    'settings.tabLang': 'Язык',
+    'settings.tabAppearance': 'Оформление',
+    'settings.tabDocument': 'Документ',
+    'settings.providerLabel': 'Провайдер ИИ',
+    'settings.providerDesc': 'Каждый провайдер хранит свой ключ / модель / адрес отдельно — переключение провайдера не удаляет данные, введённые для других. Все ключи хранятся только в локальном хранилище (localStorage) этого браузера — у инструмента нет backend. Не сохраняйте ключи на общем/публичном компьютере.',
+    'settings.providerOpenaiCompatible': 'Совместимый с OpenAI',
+    'settings.anthropicDesc': 'Получить можно на <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Оставьте пустым, чтобы предположить, что инструмент работает в песочнице артефактов claude.ai (у неё свой прокси авторизации).',
+    'settings.modelLabel': 'Модель',
+    'settings.baseUrlOptionalLabel': 'Адрес (необязательно, оставьте пустым для официального)',
+    'settings.anthropicWarning': 'ℹ️ Этот инструмент использует заголовок <code>anthropic-dangerous-direct-browser-access</code> для прямого доступа из браузера — обычно без дополнительного прокси. Но учтите: размещение ключа прямо во фронтенд-коде/хранилище браузера означает, что любой, у кого есть доступ к данным браузера на этом устройстве, теоретически может его получить. Не сохраняйте на общем/публичном компьютере, не используйте долго ключ с высоким лимитом — создайте в консоли отдельный ключ с меньшим лимитом специально для этого.',
+    'settings.openaiDesc': 'Работает с самим OpenAI, а также с любым совместимым сервисом с тем же эндпоинтом <code>/chat/completions</code> (DeepSeek, Groq, локальный Ollama и т.д.) — просто укажите ниже соответствующий базовый URL.',
+    'settings.baseUrlLabel': 'Адрес (Base URL)',
+    'settings.openaiWarning': 'ℹ️ Некоторые провайдеры не разрешают прямые межсайтовые (CORS) запросы из браузера — обычно именно из-за этого возникает ошибка «сетевой запрос не удался». Переключитесь на провайдера, разрешающего прямой доступ из браузера, либо настройте собственный прокси с поддержкой CORS.',
+    'settings.geminiDesc': 'Получить можно в <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.uiLangLabel': 'Язык интерфейса',
+    'settings.sentenceLangLabel': 'Правила разбиения на предложения (список сокращений зависит от языка)',
+    'import.scannedPdf': 'В этом PDF {pages} страниц, но нет текстового слоя — это скан (изображения страниц). Сначала обработайте его OCR (Adobe Acrobat, ABBYY FineReader, ocrmypdf), чтобы текст стал выделяемым, и импортируйте снова.',
+    'toc.closeLabel': 'Закрыть оглавление',
+    'settings.closeLabel': 'Закрыть настройки',
+    'toolbar.pageInputLabel': 'Номер страницы',
+    'book.titlePlaceholder': 'Название / автор (можно изменить)',
+    'book.chapterPlaceholder': 'Название главы',
+    'book.datesPlaceholder': 'Подзаголовок / период (необязательно)',
+    'settings.customLangPlaceholder': 'Название целевого языка, напр. Suomi / Tiếng Việt',
+    'import.pastePlaceholder': 'Вставьте исходный текст сюда…',
+    'app.title': 'Lingua Lector — интерактивное вдумчивое чтение иноязычных текстов',
+    'settings.langGeneric': 'Общий (другие языки на латинице)',
+    'settings.sentenceLangDesc': 'Не даёт сокращениям вроде «Dr.», «Mr.», «z. B.» ошибочно приниматься за конец предложения. Неверный выбор не критичен — разбиение будет лишь изредка менее точным.',
+    'settings.outputLangLabel': 'Язык вывода разбора',
+    'settings.outputLangDesc': 'Структура предложения и разбор лексики будут написаны на этом языке. Выберите «Свой вариант», чтобы указать любой язык.',
+    'settings.custom': 'Свой вариант…',
+    'settings.customLangPlaceholder': 'Укажите целевой язык, напр. Suomi / Tiếng Việt',
+    'settings.themeLabel': 'Тема',
+    'settings.themeLight': 'Светлая',
+    'settings.themeDark': 'Тёмная',
+    'settings.themeSepia': 'Сепия',
+    'settings.fontLabel': 'Шрифт и размер текста',
+    'settings.fontSerif': 'С засечками (по умолчанию)',
+    'settings.fontSans': 'Без засечек',
+    'settings.fontMono': 'Моноширинный',
+    'settings.fontSizeLabel': 'Размер:',
+    'settings.paginationLabel': 'Разбивка на страницы',
+    'settings.paginationByParagraph': 'По числу абзацев',
+    'settings.paginationFitHeight': 'По размеру экрана (один экран — одна страница)',
+    'settings.paginationNone': 'Без разбивки (длинная страница)',
+    'settings.parasPerPageLabel': 'Абзацев на странице:',
+    'settings.libraryLabel': 'Сохранённые документы',
+    'settings.libraryDesc': 'Переключение документа никогда не запускает повторную разбивку на предложения и не затрагивает кэш разбора или прогресс чтения другого документа.',
+    'settings.libraryBuiltin': 'Встроенный пример',
+    'settings.libraryChapterCount': '{n} глав',
+    'settings.libraryUntitled': 'Документ без названия',
+    'settings.libraryDelete': 'Удалить этот документ',
+    'settings.libraryClearCache': 'Очистить кэш разбора этого документа',
+    'settings.libraryRestoreExample': 'Восстановить встроенную книгу-пример',
+    'settings.chapterLabel': 'Текущая глава',
+    'settings.chapterDesc': 'Во встроенной книге 12 глав — при переключении происходит переход на первую страницу главы.',
+    'settings.importLabel': 'Импорт текста',
+    'settings.importDesc': 'Поддерживаются .txt / .docx / .pdf / .epub. Каждый импорт добавляется как новый документ в список выше.',
+    'settings.importDropHint': 'Нажмите, чтобы выбрать файл, или перетащите сюда .txt / .docx / .pdf / .epub',
+    'settings.pasteLabel': 'Или вставьте / отредактируйте текст напрямую',
+    'settings.pasteDesc': 'Разделяйте абзацы пустой строкой. «Сохранить как новый документ» добавит его в список выше, «Сохранить в текущий документ» перезапишет открытый.',
+    'settings.pastePlaceholder': 'Вставьте исходный текст сюда…',
+    'settings.splitChaptersLabel': 'Попытаться распознать заголовки и разбить на главы (отдельные короткие строки без конечной пунктуации считаются кандидатами; работает по мере возможности, потом можно скорректировать вручную)',
+    'settings.loadExample': 'Загрузить пример текста',
+    'settings.applyText': 'Применить текст',
+    'settings.applyTextNew': 'Сохранить как новый документ',
+    'settings.applyTextUpdate': 'Сохранить в текущий документ',
+    'book.addDateRange': '+ Добавить подзаголовок/диапазон дат',
+    'settings.clearCache': 'Очистить кэш разбора',
+    'settings.save': 'Сохранить настройки',
+  },
+  ja: {
+    'toolbar.hideSidebar': 'パネルを隠す',
+    'toolbar.showSidebar': 'パネルを表示',
+    'toolbar.toc': '📖 目次',
+    'toolbar.prevPage': '← 前へ',
+    'toolbar.nextPage': '次へ →',
+    'toolbar.pagerStatus': '{page} / {total} ページ',
+    'toolbar.pagerPrefix': '',
+    'toolbar.pagerSuffix': ' ページ',
+    'toolbar.openSettings': '⚙ 設定',
+    'toolbar.hint': '文をクリックすると文法・語彙解析を表示 · ← → でページ送り · Esc で閉じる',
+    'panel.title': '文の解析',
+    'panel.closeTitle': 'パネルを閉じる',
+    'panel.emptyMsg': '左側の本文の文をクリックすると、<br>ここに文構造と語彙の解説が表示されます。',
+    'panel.loading': 'この文を解析しています…',
+    'panel.retry': '再試行',
+    'panel.reanalyze': 'この文を解析し直す（キャッシュを使わない）',
+    'cache.clearedDoc': '「{title}」の解析キャッシュを消去しました。',
+    'storage.usage': 'ドキュメントとキャッシュで {used} を使用しています（保存先：{backend}）。',
+    'storage.usageLimited': 'ドキュメントとキャッシュで {used} / 約 {limit} を使用しています（保存先：{backend}。ブラウザ側の上限があります）。',
+    'storage.full': 'ブラウザのストレージが一杯です（{backend}）。保存できませんでした。不要なドキュメントを削除するか、解析キャッシュを消去してからやり直してください。',
+    'storage.writeFailed': 'ブラウザのストレージへの書き込みに失敗しました：{msg}',
+    'cache.cleared': 'この文書のすべての章の解析キャッシュを消去しました（他の文書、保存済みの設定とテキストには影響しません）。',
+    'panel.tabGrammar': '文の構造',
+    'panel.tabVocab': '語彙解説',
+    'chat.placeholder': 'この文についてさらに質問する……',
+    'chat.send': '送信',
+    'emptyState.text': 'まだ本文が読み込まれていません。<br>右上の「⚙ 設定」から .txt / .docx / .pdf ファイルをインポートするか、テキストを貼り付けてください。',
+    'emptyState.openSettings': '設定を開く',
+    'book.chapterFallback': '第{n}章',
+    'errors.noKeyNetworkFail': 'ネットワークリクエストに失敗しました。claude.ai 上でこのツールを使用していない場合は、設定で自分の API キーを入力してください。claude.ai のサンドボックス内であれば、接続を確認して再試行してください。',
+    'errors.networkFail': 'リクエストに失敗しました：接続がない、ブラウザ拡張機能による遮断、または CORS による拒否です。CORS の場合は Gemini（この制限がありません）に切り替えるか、README の server.py / Cloudflare Worker プロキシをご利用ください。',
+    'errors.noKeyStatusFail': 'リクエストに失敗しました（ステータス {status}）{detail}。claude.ai 上でこのツールを使用していない場合は、設定で自分の API キーを入力してください。',
+    'errors.invalidKey': 'API キーが拒否されました（401/403）{detail}。キーが正しいか、有効期限が切れていないか、そして現在選択中のプロバイダーのものかを確認してください。OpenAI のキーを Anthropic 欄に貼るのが最も多い原因です。',
+    'errors.rateLimited': 'リクエストが多すぎるか、利用上限に達しました（ステータス 429）{detail}',
+    'errors.apiFailed': 'API リクエストに失敗しました（ステータス {status}）{detail}',
+    'errors.emptyResponse': '応答が空でした。再試行してください',
+    'errors.vocabParseFailed': '（語彙部分を解析できませんでした。再試行してください）',
+    'errors.providerKeyRequired': '{provider} の API キーが未設定です。設定で入力してから再試行してください。',
+    'import.parsing': '{name} を解析中…',
+    'import.mammothFail': 'mammoth.js の読み込みに失敗しました。ネットワーク接続を確認してください',
+    'import.pdfjsFail': 'pdf.js の読み込みに失敗しました。ネットワーク接続を確認してください',
+    'import.epubjsFail': 'epub.js の読み込みに失敗しました。ネットワーク接続を確認してください',
+    'import.epubApplied': '{name} から {count} 章をインポートしました（合計約 {chars} 文字）。epub 内蔵の目次に基づいて自動的に分割されています。',
+    'import.pdfApplied': '{name} から {count} 章をインポートしました（合計約 {chars} 文字）。PDF 内蔵の目次に基づいて自動的に分割されています。',
+    'import.pdfGlyphWarning': ' さらに、この PDF のフォントで正しく変換できなかった文字が {count} 件見つかりました。<コード> の形で示されています。本文中の <...> の箇所を確認し、手動で修正してください。',
+    'import.epubTimeout': 'epub の解析がタイムアウトしました。ファイルが破損しているか、サポートされていない形式の可能性があります。',
+    'import.unsupportedType': '未対応のファイル形式です：.{ext}。対応形式は .txt / .docx / .pdf / .epub です。.odt / .rtf / .doc などは、LibreOffice や Word で .docx として保存してからお試しください。',
+    'import.noText': 'ファイルからテキストを抽出できませんでした。空のファイルか、スキャンした画像 PDF（OCR 非対応）の可能性があります。',
+    'import.extracted': '{name} から {count} 文字を抽出しました。下のテキストボックスの内容を確認し、問題なければ「新しいドキュメントとして保存」（開いているものを上書きするなら「現在のドキュメントに保存」）をクリックしてください。',
+    'import.parseFailed': '解析に失敗しました：{msg}',
+    'import.emptyTextarea': 'テキストボックスが空です。適用する内容がありません。',
+    'import.untitledDocument': '無題のドキュメント',
+    'import.applied': '新しいテキストを適用しました：{count} 段落{note}。',
+    'import.appliedChapterNote': '、{n} 章として認識',
+    'import.appliedNew': '新しいドキュメントとして保存しました：{count} 段落{note}。',
+    'import.appliedUpdate': '現在のドキュメントに保存しました：{count} 段落{note}。',
+    'import.loadedExample': 'サンプルテキストを読み込みました（Elisabeth von Heyking『Tagebücher aus vier Weltteilen』全巻、パブリックドメイン）。',
+    'toc.title': '目次',
+    'settings.title': '設定',
+    'settings.tabAi': 'AI とモデル',
+    'settings.tabLang': '言語',
+    'settings.tabAppearance': '外観',
+    'settings.tabDocument': 'ドキュメント',
+    'settings.providerLabel': 'AI プロバイダー',
+    'settings.providerDesc': '各プロバイダーの key・モデル・エンドポイントは個別に保存されるため、プロバイダーを切り替えても他のプロバイダーの入力内容は失われません。すべての key はこの端末のブラウザのローカルストレージ（localStorage）にのみ保存され、サーバーには送信されません（本ツールにはバックエンドがありません）。共有・公共のパソコンには保存しないでください。',
+    'settings.providerOpenaiCompatible': 'OpenAI 互換',
+    'settings.anthropicDesc': '<a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> で取得できます。空欄の場合、本ツールが claude.ai の artifact サンドボックス内（独自の認証プロキシを持つ）で動作していると仮定します。',
+    'settings.modelLabel': 'モデル',
+    'settings.baseUrlOptionalLabel': 'エンドポイント（任意、空欄なら公式エンドポイント）',
+    'settings.anthropicWarning': 'ℹ️ 本ツールは <code>anthropic-dangerous-direct-browser-access</code> ヘッダーによりブラウザから直接アクセスします。通常は追加のプロキシは不要です。ただし、key をフロントエンドコード／ブラウザのストレージに直接置くと、この端末のブラウザデータにアクセスできる人は理論上 key を取得できることに注意してください。共有・公共のパソコンには保存せず、上限額の高い key を長期間使うことも避け、この用途専用に上限の低い key をコンソールで別途作成することをおすすめします。',
+    'settings.openaiDesc': 'OpenAI 本家、および同じ <code>/chat/completions</code> エンドポイントを公開する互換サービス（DeepSeek、Groq、ローカル Ollama など）で使用できます — 下記のベース URL を該当サービスのものに変更してください。',
+    'settings.baseUrlLabel': 'エンドポイント（Base URL）',
+    'settings.openaiWarning': 'ℹ️ 一部のプロバイダーはブラウザからの直接クロスオリジン（CORS）呼び出しを許可していません。「ネットワークリクエストに失敗しました」というエラーは、たいていこれが原因です。ブラウザからの直接アクセスを許可するプロバイダーに切り替えるか、CORS に対応した独自のプロキシを構築してください。',
+    'settings.geminiDesc': '<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> で取得できます。',
+    'settings.uiLangLabel': 'インターフェース言語',
+    'settings.sentenceLangLabel': '分文ルール（言語ごとに略語リストが異なります）',
+    'import.scannedPdf': 'この PDF は {pages} ページありますが、テキストレイヤーがありません——スキャン画像です。まず OCR（Adobe Acrobat、ABBYY FineReader、ocrmypdf など）でテキストを選択可能にしてから、もう一度読み込んでください。',
+    'toc.closeLabel': '目次を閉じる',
+    'settings.closeLabel': '設定を閉じる',
+    'toolbar.pageInputLabel': 'ページ番号',
+    'book.titlePlaceholder': '作品名 / 著者（編集可）',
+    'book.chapterPlaceholder': '章タイトル',
+    'book.datesPlaceholder': 'サブタイトル / 期間（任意）',
+    'settings.customLangPlaceholder': '出力したい言語名を入力（例：Suomi / Tiếng Việt）',
+    'import.pastePlaceholder': '原文をここに貼り付けてください…',
+    'app.title': 'Lingua Lector — 外国語テキストの対話的精読リーダー',
+    'settings.langGeneric': '汎用（その他のラテン文字言語）',
+    'settings.sentenceLangDesc': '「Dr.」「Mr.」「z. B.」のような略語が文末と誤判定されるのを防ぎます。選択を間違えても大きな問題にはならず、分割の精度がまれに落ちる程度です。',
+    'settings.outputLangLabel': '解析出力言語',
+    'settings.outputLangDesc': '文構造と語彙解説はこの言語で出力されます。「カスタム」を選ぶと任意の言語名を入力できます。',
+    'settings.custom': 'カスタム…',
+    'settings.customLangPlaceholder': '対象言語を入力（例: Suomi / Tiếng Việt）',
+    'settings.themeLabel': 'テーマ',
+    'settings.themeLight': 'ライト',
+    'settings.themeDark': 'ダーク',
+    'settings.themeSepia': 'セピア',
+    'settings.fontLabel': '本文のフォントとサイズ',
+    'settings.fontSerif': 'セリフ（既定）',
+    'settings.fontSans': 'サンセリフ',
+    'settings.fontMono': '等幅',
+    'settings.fontSizeLabel': 'サイズ：',
+    'settings.paginationLabel': 'ページ分割方式',
+    'settings.paginationByParagraph': '段落数で分割',
+    'settings.paginationFitHeight': '画面に自動フィット（1画面1ページ）',
+    'settings.paginationNone': '分割しない（縦長ページ）',
+    'settings.parasPerPageLabel': '1ページあたりの段落数：',
+    'settings.libraryLabel': '保存済みのドキュメント',
+    'settings.libraryDesc': 'ドキュメントを切り替えても文の再分割は発生せず、他のドキュメントのキャッシュや読書進捗にも影響しません。',
+    'settings.libraryBuiltin': '内蔵サンプル',
+    'settings.libraryChapterCount': '全{n}章',
+    'settings.libraryUntitled': '無題のドキュメント',
+    'settings.libraryDelete': 'このドキュメントを削除',
+    'settings.libraryClearCache': 'このドキュメントの解析キャッシュを消去',
+    'settings.libraryRestoreExample': '内蔵のサンプル書籍を復元',
+    'settings.chapterLabel': '現在の章',
+    'settings.chapterDesc': '内蔵の全書は全12章。切り替えるとその章の最初のページに移動します。',
+    'settings.importLabel': 'テキストのインポート',
+    'settings.importDesc': '.txt / .docx / .pdf / .epub に対応しています。インポートするたびに、上のリストに新しいドキュメントとして追加されます。',
+    'settings.importDropHint': 'クリックしてファイルを選択するか、.txt / .docx / .pdf / .epub をここにドラッグしてください',
+    'settings.pasteLabel': 'または本文を直接貼り付け／編集',
+    'settings.pasteDesc': '段落の間は空行で区切ってください。「新しいドキュメントとして保存」で上のリストに追加され、「現在のドキュメントに保存」で開いているドキュメントを上書きします。',
+    'settings.pastePlaceholder': 'ここに原文を貼り付けてください…',
+    'settings.splitChaptersLabel': '見出しを検出して章に分割を試みる（独立した短い行で文末の句読点で終わらないものが候補になります。あくまで最善努力であり、適用後に手動調整できます）',
+    'settings.loadExample': 'サンプルテキストを読み込む',
+    'settings.applyText': 'テキストを適用',
+    'settings.applyTextNew': '新しいドキュメントとして保存',
+    'settings.applyTextUpdate': '現在のドキュメントに保存',
+    'book.addDateRange': '+ サブタイトル／日付範囲を追加',
+    'settings.clearCache': '解析キャッシュを消去',
+    'settings.save': '設定を保存',
+  },
+};
+
+function resolveUiLang() {
+  if (settings.uiLang && UI_LANGS.includes(settings.uiLang)) return settings.uiLang;
+  try {
+    const nav = (navigator.language || 'zh').toLowerCase();
+    if (nav.startsWith('zh-hant') || nav.startsWith('zh-tw') || nav.startsWith('zh-hk')) return 'zh-hant';
+    const base = nav.split('-')[0];
+    if (UI_LANGS.includes(base)) return base;
+  } catch (e) { /* navigator unavailable */ }
+  return 'zh';
+}
+
+function t(key, vars) {
+  const lang = resolveUiLang();
+  const dict = I18N[lang] || I18N.zh;
+  // NOTE: must use hasOwnProperty, not `||`. Several keys legitimately translate
+  // to the empty string (e.g. 'toolbar.pagerSuffix' is '' in en/de/fr/es/it/ru
+  // because those languages put the whole label in the prefix). A falsy check
+  // here silently fell back to the Chinese string and rendered "页" in every UI
+  // language.
+  let str;
+  if (dict && Object.prototype.hasOwnProperty.call(dict, key)) str = dict[key];
+  else if (Object.prototype.hasOwnProperty.call(I18N.zh, key)) str = I18N.zh[key];
+  else str = key;
+  if (vars) {
+    Object.keys(vars).forEach(k => { str = str.split('{' + k + '}').join(vars[k]); });
+  }
+  return str;
+}
+
+// UI language code -> BCP 47 tag for the lang attribute. Only zh needs a
+// script subtag; the rest are already valid as-is.
+const BCP47_FOR_UI_LANG = { zh: 'zh-Hans', 'zh-hant': 'zh-Hant' };
+
+function applyI18n() {
+  // Keep the document language in step with the UI. This was hardcoded to
+  // "zh", so assistive tech applied Chinese pronunciation rules to every
+  // interface string no matter which language was selected.
+  const uiLang = resolveUiLang();
+  document.documentElement.lang = BCP47_FOR_UI_LANG[uiLang] || uiLang;
+
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    el.innerHTML = t(el.dataset.i18n);
+  });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+    el.placeholder = t(el.dataset.i18nPlaceholder);
+  });
+  document.querySelectorAll('[data-i18n-title]').forEach(el => {
+    el.title = t(el.dataset.i18nTitle);
+  });
+  // aria-label rather than title: controls whose only visible content is an
+  // icon (✕, →) have no accessible name otherwise, and title is not reliably
+  // announced by screen readers.
+  document.querySelectorAll('[data-i18n-label]').forEach(el => {
+    el.setAttribute('aria-label', t(el.dataset.i18nLabel));
+  });
+}
+</script>

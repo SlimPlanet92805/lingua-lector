@@ -1,0 +1,433 @@
+<script>
+"use strict";
+
+// ============================================================
+// UI language switcher
+// ============================================================
+function populateUiLangSelect() {
+  const sel = document.getElementById('ui-lang-select');
+  if (!sel) return;
+  sel.innerHTML = '';
+  UI_LANGS.forEach(code => {
+    const opt = document.createElement('option');
+    opt.value = code;
+    opt.textContent = UI_LANG_NAMES[code] || code;
+    sel.appendChild(opt);
+  });
+  sel.value = resolveUiLang();
+}
+
+function refreshUiLanguage() {
+  applyI18n();
+  updatePagerUI();
+  renderTocList();
+  populateChapterSelect();
+}
+
+function wireUiLangSelect() {
+  const sel = document.getElementById('ui-lang-select');
+  if (!sel) return;
+  sel.addEventListener('change', (e) => {
+    settings.uiLang = e.target.value;
+    saveSettingsToLocalStorage();
+    refreshUiLanguage();
+  });
+}
+
+// ============================================================
+// Settings modal wiring
+// ============================================================
+// Focus handling for the settings dialog. Without it a keyboard or screen
+// reader user opens the dialog and their focus is still out in the page
+// behind it -- they tab through the whole reader before reaching any control,
+// and never learn the dialog opened at all.
+let settingsReturnFocus = null;
+
+function focusableInSettings() {
+  return [...document.querySelectorAll(
+    '#settings-overlay button, #settings-overlay input, #settings-overlay select, #settings-overlay textarea, #settings-overlay [tabindex]:not([tabindex="-1"])'
+  )].filter(el => !el.disabled && el.offsetParent !== null);
+}
+
+function openSettings() {
+  settingsReturnFocus = document.activeElement;
+  document.getElementById('settings-overlay').classList.remove('hidden');
+  syncSettingsFormFromState();
+  const first = focusableInSettings()[0];
+  if (first) first.focus();
+}
+function closeSettings() {
+  document.getElementById('settings-overlay').classList.add('hidden');
+  // hand focus back to whatever opened the dialog, not to the top of the page
+  if (settingsReturnFocus && typeof settingsReturnFocus.focus === 'function') {
+    settingsReturnFocus.focus();
+  }
+  settingsReturnFocus = null;
+}
+
+// Keep Tab inside the dialog while it is open.
+function wireSettingsFocusTrap() {
+  document.getElementById('settings-overlay').addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    const items = focusableInSettings();
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
+}
+
+function syncProviderFieldsVisibility() {
+  ['anthropic', 'openai', 'gemini'].forEach(p => {
+    document.getElementById('provider-fields-' + p).classList.toggle('hidden', p !== settings.provider);
+  });
+}
+
+function syncSettingsFormFromState() {
+  document.querySelectorAll('#provider-chips .radio-chip').forEach(chip => {
+    chip.classList.toggle('selected', chip.dataset.provider === settings.provider);
+  });
+  syncProviderFieldsVisibility();
+  document.getElementById('anthropic-key-input').value = settings.providers.anthropic.apiKey || '';
+  document.getElementById('anthropic-model-input').value = settings.providers.anthropic.model || PROVIDER_DEFAULTS.anthropic.model;
+  document.getElementById('anthropic-baseurl-input').value = settings.providers.anthropic.baseUrl || '';
+  document.getElementById('openai-key-input').value = settings.providers.openai.apiKey || '';
+  document.getElementById('openai-baseurl-input').value = settings.providers.openai.baseUrl || PROVIDER_DEFAULTS.openai.baseUrl;
+  document.getElementById('openai-model-input').value = settings.providers.openai.model || PROVIDER_DEFAULTS.openai.model;
+  document.getElementById('gemini-key-input').value = settings.providers.gemini.apiKey || '';
+  document.getElementById('gemini-baseurl-input').value = settings.providers.gemini.baseUrl || PROVIDER_DEFAULTS.gemini.baseUrl;
+  document.getElementById('gemini-model-input').value = settings.providers.gemini.model || PROVIDER_DEFAULTS.gemini.model;
+
+  document.getElementById('paras-per-page-input').value = settings.parasPerPage || 8;
+
+  document.querySelectorAll('#lang-rule-chips .radio-chip').forEach(chip => {
+    chip.classList.toggle('selected', chip.dataset.lang === settings.sentenceLang);
+  });
+  document.querySelectorAll('#output-lang-chips .radio-chip').forEach(chip => {
+    chip.classList.toggle('selected', chip.dataset.outlang === settings.outputLang);
+  });
+  document.getElementById('output-lang-custom-input').style.display =
+    settings.outputLang === 'custom' ? 'block' : 'none';
+  document.getElementById('output-lang-custom-input').value = settings.customOutputLang || '';
+
+  document.querySelectorAll('#pagination-mode-chips .radio-chip').forEach(chip => {
+    chip.classList.toggle('selected', chip.dataset.mode === settings.paginationMode);
+  });
+  document.getElementById('paras-per-page-wrap').style.display =
+    settings.paginationMode === 'none' ? 'none' : 'block';
+
+  document.querySelectorAll('#theme-chips .radio-chip').forEach(chip => {
+    chip.classList.toggle('selected', chip.dataset.theme === (settings.theme || 'light'));
+  });
+  document.getElementById('font-family-select').value = settings.fontFamily || 'serif';
+  document.getElementById('font-size-input').value = settings.fontSize || 19;
+  document.getElementById('font-size-value').textContent = (settings.fontSize || 19) + 'px';
+
+  populateChapterSelect();
+  renderDocLibraryList();
+  document.getElementById('raw-text-area').value = paragraphsToText(PARAGRAPHS);
+}
+
+// ============================================================
+// Theme + font application (CSS custom properties on <html>)
+// ============================================================
+const FONT_FAMILY_VALUES = {
+  serif: 'var(--serif)',
+  sans: 'var(--sans)',
+  mono: '"SF Mono", Consolas, "Courier New", monospace',
+};
+
+function applyTheme() {
+  if (settings.theme) {
+    document.documentElement.dataset.theme = settings.theme;
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+}
+
+function applyFont() {
+  document.documentElement.style.setProperty('--reading-font-family', FONT_FAMILY_VALUES[settings.fontFamily] || FONT_FAMILY_VALUES.serif);
+  document.documentElement.style.setProperty('--reading-font-size', (settings.fontSize || 19) + 'px');
+}
+
+function wireSettingsTabs() {
+  document.querySelectorAll('.settings-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.settings-tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.settings-tab-panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.querySelector(`.settings-tab-panel[data-settings-tab="${btn.dataset.settingsTab}"]`).classList.add('active');
+    });
+  });
+}
+
+// Model <input list="..."> fields only show their <datalist> suggestions
+// unfiltered when the field is empty -- with existing text in it, the
+// browser filters the list down to substring/prefix matches (or shows
+// nothing at all if the current value doesn't match any option), which
+// reads as "the dropdown won't open". Clearing the field on focus and
+// restoring it on blur (if nothing was picked/typed) gives the always-see-
+// all-options behavior users expect from a combobox.
+function wireModelSuggestionInputs() {
+  ['anthropic-model-input', 'openai-model-input', 'gemini-model-input'].forEach(id => {
+    const input = document.getElementById(id);
+    if (!input) return;
+    input.addEventListener('focus', () => {
+      input.dataset.prevValue = input.value;
+      input.value = '';
+    });
+    input.addEventListener('blur', () => {
+      if (input.value.trim() === '' && input.dataset.prevValue) {
+        input.value = input.dataset.prevValue;
+      }
+      delete input.dataset.prevValue;
+    });
+  });
+}
+
+function wireSettingsModal() {
+  document.getElementById('btn-open-settings').addEventListener('click', openSettings);
+  wireModelSuggestionInputs();
+  document.getElementById('btn-close-settings').addEventListener('click', closeSettings);
+  document.getElementById('settings-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'settings-overlay') closeSettings();
+  });
+  wireSettingsTabs();
+
+  document.querySelectorAll('#provider-chips .radio-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('#provider-chips .radio-chip').forEach(c => c.classList.remove('selected'));
+      chip.classList.add('selected');
+      settings.provider = chip.dataset.provider;
+      syncProviderFieldsVisibility();
+    });
+  });
+  document.querySelectorAll('#lang-rule-chips .radio-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('#lang-rule-chips .radio-chip').forEach(c => c.classList.remove('selected'));
+      chip.classList.add('selected');
+    });
+  });
+  document.querySelectorAll('#output-lang-chips .radio-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('#output-lang-chips .radio-chip').forEach(c => c.classList.remove('selected'));
+      chip.classList.add('selected');
+      document.getElementById('output-lang-custom-input').style.display =
+        chip.dataset.outlang === 'custom' ? 'block' : 'none';
+    });
+  });
+  document.querySelectorAll('#pagination-mode-chips .radio-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('#pagination-mode-chips .radio-chip').forEach(c => c.classList.remove('selected'));
+      chip.classList.add('selected');
+      document.getElementById('paras-per-page-wrap').style.display =
+        chip.dataset.mode === 'none' ? 'none' : 'block';
+    });
+  });
+  document.querySelectorAll('#theme-chips .radio-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('#theme-chips .radio-chip').forEach(c => c.classList.remove('selected'));
+      chip.classList.add('selected');
+    });
+  });
+  document.getElementById('font-size-input').addEventListener('input', (e) => {
+    document.getElementById('font-size-value').textContent = e.target.value + 'px';
+  });
+
+  document.getElementById('chapter-select').addEventListener('change', (e) => {
+    switchChapter(parseInt(e.target.value, 10));
+    syncSettingsFormFromState();
+  });
+
+  document.getElementById('btn-load-example').addEventListener('click', loadExampleText);
+  document.getElementById('btn-restore-example').addEventListener('click', async () => {
+    await loadExampleText();
+    syncSettingsFormFromState();
+  });
+  // Deliberately does NOT read the title fields: they describe the document
+  // that is currently open, and a new document must not inherit its titles.
+  // Importing a 391-page PDF while the example book was open used to produce a
+  // document whose only chapter was called "Einleitung" -- the same inheritance
+  // bug applyNewChapters() already fixes for bookTitle. The fields are
+  // repopulated from the new document by syncTitleFieldsFromState() right after,
+  // so renaming it is still one keystroke away.
+  document.getElementById('btn-apply-text-new').addEventListener('click', () => {
+    applyTextAsNewDocument();
+  });
+  document.getElementById('btn-apply-text-update').addEventListener('click', () => {
+    bookTitle = document.getElementById('book-title-field').value.trim() || bookTitle;
+    chapterTitle = document.getElementById('chapter-title-field').value.trim() || chapterTitle;
+    chapterDates = document.getElementById('chapter-dates-field').value.trim();
+    applyTextToCurrentDocument();
+  });
+
+  document.getElementById('btn-clear-cache').addEventListener('click', async () => {
+    await clearCurrentDocumentCache();
+    setImportStatus(t('cache.cleared'), 'success');
+    renderStorageUsage();
+  });
+
+  document.getElementById('btn-save-settings').addEventListener('click', () => {
+    // Only settings that actually change how the text is split into
+    // sentences or laid out into pages should reset/rebuild the reading
+    // view -- e.g. just switching the AI provider/model used to also jump
+    // the reader back to page 1 for no reason, because this handler always
+    // called rebuildParagraphSentences()+renderPage(0) unconditionally.
+    const prevSentenceLang = settings.sentenceLang;
+    const prevPaginationMode = settings.paginationMode;
+    const prevParasPerPage = settings.parasPerPage;
+    const prevFontFamily = settings.fontFamily;
+    const prevFontSize = settings.fontSize;
+
+    const selectedProvider = document.querySelector('#provider-chips .radio-chip.selected');
+    settings.provider = selectedProvider ? selectedProvider.dataset.provider : 'anthropic';
+
+    settings.providers.anthropic.apiKey = document.getElementById('anthropic-key-input').value.trim();
+    settings.providers.anthropic.model = document.getElementById('anthropic-model-input').value.trim() || PROVIDER_DEFAULTS.anthropic.model;
+    settings.providers.anthropic.baseUrl = document.getElementById('anthropic-baseurl-input').value.trim();
+    settings.providers.openai.apiKey = document.getElementById('openai-key-input').value.trim();
+    settings.providers.openai.baseUrl = document.getElementById('openai-baseurl-input').value.trim() || PROVIDER_DEFAULTS.openai.baseUrl;
+    settings.providers.openai.model = document.getElementById('openai-model-input').value.trim() || PROVIDER_DEFAULTS.openai.model;
+    settings.providers.gemini.apiKey = document.getElementById('gemini-key-input').value.trim();
+    settings.providers.gemini.baseUrl = document.getElementById('gemini-baseurl-input').value.trim() || PROVIDER_DEFAULTS.gemini.baseUrl;
+    settings.providers.gemini.model = document.getElementById('gemini-model-input').value.trim() || PROVIDER_DEFAULTS.gemini.model;
+
+    const selectedLang = document.querySelector('#lang-rule-chips .radio-chip.selected');
+    settings.sentenceLang = selectedLang ? selectedLang.dataset.lang : 'de';
+
+    const selectedOutLang = document.querySelector('#output-lang-chips .radio-chip.selected');
+    settings.outputLang = selectedOutLang ? selectedOutLang.dataset.outlang : 'zh';
+    settings.customOutputLang = document.getElementById('output-lang-custom-input').value.trim();
+
+    const selectedMode = document.querySelector('#pagination-mode-chips .radio-chip.selected');
+    settings.paginationMode = selectedMode ? selectedMode.dataset.mode : 'paragraphs';
+
+    const perPage = parseInt(document.getElementById('paras-per-page-input').value, 10);
+    settings.parasPerPage = (Number.isFinite(perPage) && perPage > 0) ? perPage : 8;
+
+    const selectedTheme = document.querySelector('#theme-chips .radio-chip.selected');
+    settings.theme = selectedTheme ? selectedTheme.dataset.theme : '';
+
+    settings.fontFamily = document.getElementById('font-family-select').value;
+    const fontSize = parseInt(document.getElementById('font-size-input').value, 10);
+    settings.fontSize = Number.isFinite(fontSize) ? fontSize : 19;
+
+    saveSettingsToLocalStorage();
+    applyTheme();
+    applyFont();
+
+    const sentenceLangChanged = settings.sentenceLang !== prevSentenceLang;
+    const layoutChanged = settings.paginationMode !== prevPaginationMode ||
+      settings.parasPerPage !== prevParasPerPage ||
+      settings.fontFamily !== prevFontFamily ||
+      settings.fontSize !== prevFontSize;
+
+    if (sentenceLangChanged) {
+      // re-splitting into sentences invalidates sid-based state entirely --
+      // page 0 is the only sane place to land
+      rebuildParagraphSentences();
+      renderPage(0);
+    } else if (layoutChanged) {
+      // pagination/font geometry changed but the sentences themselves
+      // didn't -- recompute page boundaries and try to stay close to where
+      // the reader was rather than snapping back to page 1
+      recomputeTotalPages();
+      renderPage(Math.min(currentPage, totalPages - 1));
+    }
+    // else: nothing that affects the reading view changed (provider, model,
+    // API key, output language, theme, ...) -- leave the current page alone
+
+    closeSettings();
+  });
+
+  wireFileImport();
+}
+
+// ============================================================
+// Title fields wiring
+// ============================================================
+function wireTitleFields() {
+  const bookEl = document.getElementById('book-title-field');
+  const chapterEl = document.getElementById('chapter-title-field');
+  const datesEl = document.getElementById('chapter-dates-field');
+
+  syncTitleFieldsFromState();
+
+  bookEl.addEventListener('change', () => {
+    bookTitle = bookEl.value;
+    saveTextToLocalStorage();
+  });
+  chapterEl.addEventListener('change', () => {
+    chapterTitle = chapterEl.value;
+    if (chapters[currentChapterIndex]) chapters[currentChapterIndex].title = chapterTitle;
+    renderTocList();
+    populateChapterSelect();
+    saveTextToLocalStorage();
+  });
+  datesEl.addEventListener('change', () => {
+    chapterDates = datesEl.value;
+    if (chapters[currentChapterIndex]) chapters[currentChapterIndex].dateRange = chapterDates;
+    renderTocList();
+    populateChapterSelect();
+    saveTextToLocalStorage();
+  });
+
+  const addDatesBtn = document.getElementById('btn-add-dates');
+  if (addDatesBtn) {
+    addDatesBtn.addEventListener('click', () => {
+      datesEl.classList.remove('hidden');
+      addDatesBtn.classList.add('hidden');
+      datesEl.focus();
+    });
+  }
+}
+
+// ============================================================
+// App init
+// ============================================================
+document.getElementById('btn-close-panel').addEventListener('click', togglePanel);
+document.getElementById('btn-toggle-panel').addEventListener('click', togglePanel);
+
+(async function init() {
+  loadSettingsFromLocalStorage();
+  applyTheme();
+  applyFont();
+  populateUiLangSelect();
+  wireUiLangSelect();
+  applyI18n();
+
+  await loadInitialDocument();
+
+  wireTitleFields();
+  wireSettingsModal();
+  wireSettingsFocusTrap();
+  wirePagerControls();
+  wireToc();
+  wireKeyboardShortcuts();
+  wireResizeRerender();
+  populateChapterSelect();
+  renderTocList();
+  renderDocLibraryList();
+
+  rebuildParagraphSentences();
+  const savedPage = await loadProgress();
+  renderPage(savedPage);
+
+  if (!currentProviderSettings().apiKey) {
+    // gentle nudge, not blocking: open settings automatically only the very
+    // first time (no settings saved yet at all)
+    const neverConfigured = !localStorage.getItem(SETTINGS_KEY);
+    if (neverConfigured) {
+      setTimeout(openSettings, 400);
+    }
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,806 @@
+<script>
+"use strict";
+
+// ============================================================
+// Text -> paragraphs helper
+// ============================================================
+function textToParagraphs(rawText) {
+  return rawText
+    .replace(/\r\n/g, '\n')
+    .split(/\n\s*\n/)
+    .map(p => p.replace(/\n/g, ' ').trim())
+    .filter(p => p.length > 0);
+}
+
+function paragraphsToText(paragraphs) {
+  return paragraphs.join('\n\n');
+}
+
+// ============================================================
+// PDF text extraction (pdf.js), position-aware.
+//
+// A naive "join every text item with spaces" import drags running headers
+// and page numbers into the middle of sentences, and loses paragraph
+// structure entirely. This groups items into lines by y-position, then:
+//   - drops isolated top/bottom-of-page lines that look like page numbers
+//     or running headers (short, no lowercase letters)
+//   - treats an indented line (relative to the page's body-text left margin)
+//     as a new paragraph, EXCEPT while inside an unclosed [...] aside/
+//     footnote, which is often typeset with irregular indentation
+//   - joins line-wrapped compound words (line ends in "-") without
+//     re-inserting the space, keeping the hyphen itself
+// This mirrors the approach validated on the bundled example book's own
+// PDF extraction (see build.py) — same heuristics, ported to run client-side
+// against pdf.js's textContent instead of pdfplumber.
+// ============================================================
+// Some PDFs (typically InDesign/Adobe-produced) map a handful of glyphs --
+// most commonly old-style/"fitted" digit variants -- into the Private Use
+// Area instead of their real Unicode codepoint, because the font's
+// ToUnicode CMap uses Adobe's own glyph-name convention rather than
+// standard Unicode. pdf.js (and every other extractor, e.g. pypdf) faithfully
+// returns whatever the font says, so this shows up as garbled/tofu
+// characters in the extracted text. "onefitted" (U+F6DC, a fixed-width "1"
+// used so numerals line up in tables) is common enough to safely fix; ligatures
+// are real, valid Unicode but get expanded too since they paste badly into
+// some non-Unicode-aware targets. Anything else in the PUA is unmappable
+// in general (the same codepoint means something different in every font),
+// so it's swapped for a visible "<41>"-style marker instead of silently
+// vanishing or corrupting adjacent text, and counted so the caller can warn.
+const PDF_KNOWN_GLYPH_FIXUPS = { '': '1' };
+const PDF_LIGATURE_FIXUPS = {
+  'ﬀ': 'ff', 'ﬁ': 'fi', 'ﬂ': 'fl', 'ﬃ': 'ffi', 'ﬄ': 'ffl', 'ﬅ': 'st', 'ﬆ': 'st',
+};
+let pdfUnmappableGlyphCount = 0;
+// Page count of the PDF most recently opened, so an empty extraction can be
+// reported as "this is a scan" rather than the generic "no text found".
+let pdfLastPageCount = 0;
+function normalizePdfGlyphs(str) {
+  let out = '';
+  for (const ch of str) {
+    if (PDF_KNOWN_GLYPH_FIXUPS[ch] !== undefined) { out += PDF_KNOWN_GLYPH_FIXUPS[ch]; continue; }
+    if (PDF_LIGATURE_FIXUPS[ch] !== undefined) { out += PDF_LIGATURE_FIXUPS[ch]; continue; }
+    const cp = ch.codePointAt(0);
+    // Private Use Area (BMP) + a couple of PUA supplementary planes
+    if ((cp >= 0xE000 && cp <= 0xF8FF) || (cp >= 0xF0000 && cp <= 0x10FFFD)) {
+      pdfUnmappableGlyphCount++;
+      out += `<${cp.toString(16)}>`;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+async function extractPdfLines(page) {
+  const content = await page.getTextContent();
+  const viewport = page.getViewport({ scale: 1 });
+  const pageHeight = viewport.height;
+
+  // Group text items into lines by clustering baselines.
+  //
+  // WHY NOT USE pdf.js's OWN LINE BREAKS: text items carry a `hasEOL` flag,
+  // which looks like exactly the library-provided line segmentation this code
+  // re-derives. It was measured head to head on both bundled books rather than
+  // assumed, and it loses:
+  //
+  //   Deutschmeister   geometric 1341 paragraphs / 75 short fragments
+  //                    hasEOL    1431 paragraphs / 93 short fragments
+  //   Heyking          identical either way
+  //
+  // Two reasons. `hasEOL` ends a line wherever pdf.js's text layer wants one,
+  // which over-splits text wrapped around figures; and pdf.js synthesises
+  // whitespace items that are wrong for this typography -- it renders
+  // "die 300 -Jahr-Feier" and "am 9 . und 10 ." because it inserts a space
+  // around the differently-sized numerals. Deciding spacing from the measured
+  // horizontal gap (below) gets those right. Keep the geometry; don't "simplify"
+  // this back to hasEOL without re-running that comparison.
+  //
+  // This used to snap each baseline onto a fixed 2pt grid
+  // (`Math.round(y / 2) * 2`). That silently mangles any book that sets
+  // numerals in a slightly different size from the surrounding prose --
+  // common in older DTP layouts. A 9pt body line and the 8pt digits sitting
+  // *on the same visual line* differ in baseline by well under a point, but
+  // if that difference happens to straddle a grid boundary the digits are
+  // bucketed as a separate line. They then either get dropped by the
+  // footnote-marker rule below or glued onto a neighbouring line as garbage
+  // ("Das Jahr 1996 brachte ... die 300-Jahr-Feier" came out as "Das Jahr
+  // brachte ... die -Jahr-Feier" with a stray "1996300" line). Dates and
+  // figures vanishing out of the middle of sentences is about the worst
+  // failure mode this importer can have, and a fixed grid will always have
+  // boundaries for a baseline to land on.
+  //
+  // Greedy clustering against the current line's own baseline has no
+  // boundaries to straddle: an item joins the line it is actually closest to.
+  // Tolerance scales with glyph height but stays well below normal leading,
+  // so genuinely separate lines never merge.
+  const items = [];
+  for (const item of content.items) {
+    const str = normalizePdfGlyphs(item.str);
+    if (!str.trim()) continue;
+    items.push({ x: item.transform[4], y: item.transform[5], w: item.width || 0, h: item.height || 0, str });
+  }
+  // top-to-bottom, then left-to-right within a line
+  items.sort((a, b) => (b.y - a.y) || (a.x - b.x));
+
+  const grouped = [];
+  for (const it of items) {
+    const tol = Math.max(3, it.h * 0.4);
+    const last = grouped[grouped.length - 1];
+    if (last && Math.abs(last.y - it.y) <= tol) last.parts.push(it);
+    else grouped.push({ y: it.y, parts: [it] });
+  }
+
+  // Re-sort each line's pieces by x before joining. Content-stream order is
+  // not reading order -- layout tools routinely emit a line's body text in
+  // one pass and come back for the differently-styled runs afterwards -- so
+  // joining in emission order scrambles exactly those numerals. Whether to
+  // insert a space is decided from the actual horizontal gap rather than
+  // unconditionally, so "300" + "-Jahr-Feier" stays one word while genuinely
+  // separated runs still get their space.
+  const lines = grouped.map(line => {
+    line.parts.sort((a, b) => a.x - b.x);
+    let text = '';
+    let prevEnd = null;
+    for (const p of line.parts) {
+      const gap = prevEnd === null ? 0 : p.x - prevEnd;
+      const needsSpace = text && !text.endsWith(' ') && !p.str.startsWith(' ') && gap > p.h * 0.25;
+      text += (needsSpace ? ' ' : '') + p.str;
+      prevEnd = p.x + p.w;
+    }
+    return { y: line.y, x0: Math.min(...line.parts.map(p => p.x)), text: text.trim() };
+  }).filter(l => l.text.length > 0);
+
+  // drop likely running headers / page numbers: short, no lowercase letters,
+  // sitting in the top or bottom ~9% of the page
+  const topBand = pageHeight * 0.91;
+  const bottomBand = pageHeight * 0.09;
+  return lines.filter(l => {
+    const nearEdge = l.y > topBand || l.y < bottomBand;
+    const looksLikeFolio = l.text.length <= 12 && !/[a-zà-öø-ÿ]/.test(l.text);
+    return !(nearEdge && looksLikeFolio);
+  });
+}
+
+// Shared core: walks every page once, producing paragraphs AND which
+// (0-based) page each paragraph started on -- the page numbers are what let
+// extractPdfChapters() below map the PDF's own embedded outline/bookmarks
+// onto paragraph boundaries. `pdf` is an already-opened pdf.js document.
+//
+// Two passes on purpose: a per-page running estimate of the body-text left
+// margin (blended page to page) sounds reasonable but drifts badly right at
+// the start of the book -- a cover/title page's centered, scattered x0
+// values pull the very first estimate far from the true margin, and it only
+// converges back over several pages of exponential decay. That's long
+// enough to silently swallow every paragraph break in the book's first
+// chapter while later chapters look fine, which is a confusing, hard-to-spot
+// failure mode. Collecting every line first and taking one global mode
+// across the whole document sidesteps this: a handful of front-matter pages
+// can't outvote a whole book's worth of body-margin lines.
+async function extractPdfParagraphsWithPages(pdf) {
+  const pageLines = []; // [{ page, lines }, ...], 1-indexed page number
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const lines = await extractPdfLines(page);
+    if (lines.length) pageLines.push({ page: p, lines });
+  }
+
+  // Body-margin mode, computed separately for odd and even pages. Properly
+  // bound books commonly mirror their margins page to page to leave room for
+  // the binding (e.g. left margin 57pt on odd pages, 127pt on even pages) --
+  // a single global margin makes every line on whichever parity is less
+  // common look "indented" relative to it, fragmenting every paragraph into
+  // one line each. Splitting the vote by page parity handles that; books
+  // with a single consistent margin just get the same value for both and
+  // behave exactly as before.
+  function marginModeFor(pred) {
+    const counts = new Map();
+    for (const { page, lines } of pageLines) {
+      if (!pred(page)) continue;
+      for (const line of lines) {
+        if (line.text.length < 15) continue;
+        const x = Math.round(line.x0);
+        counts.set(x, (counts.get(x) || 0) + 1);
+      }
+    }
+    return counts.size ? [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0] : null;
+  }
+  const bodyX0Global = marginModeFor(() => true) || 0;
+  const bodyX0Odd = marginModeFor(p => p % 2 === 1) ?? bodyX0Global;
+  const bodyX0Even = marginModeFor(p => p % 2 === 0) ?? bodyX0Global;
+
+  const paragraphs = [];
+  const pageOfParagraph = [];
+  let current = [];
+  let currentStartPage = 0;
+  let bracketDepth = 0;
+
+  function flush() {
+    if (!current.length) return;
+    let text = '';
+    for (const line of current) {
+      if (text.endsWith('-')) text += line;
+      else if (text) text += ' ' + line;
+      else text = line;
+    }
+    text = text.replace(/([^\s\[(])\[/g, '$1 [').trim();
+    if (text) {
+      paragraphs.push(text);
+      pageOfParagraph.push(currentStartPage);
+    }
+    current = [];
+  }
+
+  for (const { page: p, lines } of pageLines) {
+    const bodyX0 = p % 2 === 0 ? bodyX0Even : bodyX0Odd;
+
+    // Per-page block margins. A page whose text wraps around a figure (or is
+    // set in more than one column) has a second run of lines starting well to
+    // the right of the page margin. Measured against the page margin alone
+    // every one of those lines looks like a first-line indent, so the whole
+    // run fragments into one-line paragraphs -- the single biggest source of
+    // junk paragraphs in figure-heavy books.
+    //
+    // The two cases are separable by shape: a first-line indent is a lone
+    // line sitting a typographic indent (~10-25pt) inside its margin, while a
+    // wrapped block is many lines sharing a left edge much further in. So
+    // require both a repeated edge and a large offset before treating an x0
+    // as a margin in its own right; indents *within* such a block are then
+    // measured against it and still detected normally.
+    const edgeCounts = new Map();
+    for (const line of lines) {
+      if (line.text.length < 15) continue;
+      const x = Math.round(line.x0);
+      edgeCounts.set(x, (edgeCounts.get(x) || 0) + 1);
+    }
+    const blockMargins = [bodyX0];
+    for (const [x, n] of edgeCounts) {
+      if (n >= 3 && x >= bodyX0 + 40) blockMargins.push(x);
+    }
+    blockMargins.sort((a, b) => a - b);
+
+    for (const line of lines) {
+      // a standalone line that's nothing but 1-3 digits, appearing
+      // mid-paragraph rather than in the page-edge folio band, is almost
+      // always a superscript footnote reference marker picked up as its own
+      // line (its baseline sits slightly off the body text's, so it doesn't
+      // get merged into the surrounding line by extractPdfLines' y-grouping).
+      // It has no antecedent to link to once the footnote text itself is
+      // just another paragraph elsewhere on the page, so dropping it reads
+      // far better than leaving a bare "24" fragmenting the paragraph in two.
+      if (/^\d{1,3}$/.test(line.text.trim())) continue;
+
+      // 8pt used to be the cutoff, but that's exactly the first-line-indent
+      // width some books use (right at the boundary, so a strict ">" missed
+      // every single paragraph break) -- 4pt still filters out OCR/kerning
+      // jitter on the body margin while catching a real indent this small
+      // measure the indent against the innermost block margin this line
+      // actually sits inside, not against the page margin
+      const lineX0 = Math.round(line.x0);
+      let effectiveX0 = bodyX0;
+      for (const m of blockMargins) {
+        if (m <= lineX0) effectiveX0 = m;
+      }
+      const isIndented = lineX0 > effectiveX0 + 4;
+      if (isIndented && current.length && bracketDepth === 0) flush();
+      if (!current.length) currentStartPage = p - 1; // 0-based, matches pdf.js's own page-index convention
+      current.push(line.text);
+      bracketDepth += (line.text.match(/\[/g) || []).length - (line.text.match(/\]/g) || []).length;
+      bracketDepth = Math.max(0, bracketDepth);
+    }
+  }
+  flush();
+  return { paragraphs, pageOfParagraph };
+}
+
+async function extractPdfText(arrayBuffer) {
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  pdfLastPageCount = pdf.numPages;
+  const { paragraphs } = await extractPdfParagraphsWithPages(pdf);
+  return paragraphs.join('\n\n');
+}
+
+// Resolves an outline entry's `dest` (either a named destination string, or
+// an explicit [ref, ...] array) down to a 0-based page index.
+async function resolvePdfDestToPageIndex(pdf, dest) {
+  try {
+    let d = dest;
+    if (typeof d === 'string') d = await pdf.getDestination(d);
+    if (!d || !d[0]) return null;
+    return await pdf.getPageIndex(d[0]);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function flattenPdfOutline(pdf, items, out) {
+  out = out || [];
+  for (const item of (items || [])) {
+    const pageIndex = await resolvePdfDestToPageIndex(pdf, item.dest);
+    const title = (item.title || '').trim();
+    if (title) out.push({ title, pageIndex });
+    if (item.items && item.items.length) await flattenPdfOutline(pdf, item.items, out);
+  }
+  return out;
+}
+
+// Many PDFs (this book's original scan included) carry their own embedded
+// table of contents (bookmarks) -- pdf.js exposes it via getOutline(), each
+// entry pointing at a page. Prefer that over the generic paragraph-shape
+// heading heuristic whenever it's present and usable, since it's the
+// author's own actual chapter structure rather than a guess. Returns null
+// (letting the caller fall back to the flat-text heuristic path) when no
+// usable outline exists.
+async function extractPdfChapters(arrayBuffer) {
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  pdfLastPageCount = pdf.numPages;
+
+  let bookTitle = '';
+  try {
+    const meta = await pdf.getMetadata();
+    bookTitle = (meta && meta.info && meta.info.Title || '').trim();
+    // some desktop-publishing tools (PageMaker, InDesign, QuarkXPress, ...)
+    // leave the source layout file's own name in the Title field instead of
+    // the actual document title (e.g. "01___Eingangsseiten NEU.p65") -- that's
+    // worse than no title at all, so treat it as absent and let the caller's
+    // filename-based fallback take over instead
+    if (/\.(p65|pmd|indd|qxd|qxp|ai|psd)$/i.test(bookTitle)) bookTitle = '';
+  } catch (e) { /* metadata is optional */ }
+
+  const outline = await pdf.getOutline().catch(() => null);
+  const flatOutline = (outline && outline.length) ? await flattenPdfOutline(pdf, outline) : [];
+  const usable = flatOutline
+    .filter(o => Number.isInteger(o.pageIndex))
+    .sort((a, b) => a.pageIndex - b.pageIndex);
+  // collapse entries that resolve to the same page (nested subsections
+  // landing on their parent's first page) down to just the first/outer one --
+  // paragraph-level granularity can't place them any more precisely anyway
+  const marks = [];
+  for (const o of usable) {
+    if (marks.length && marks[marks.length - 1].pageIndex === o.pageIndex) continue;
+    marks.push(o);
+  }
+  if (marks.length < 2) return null; // not enough structure to be worth using
+
+  const { paragraphs, pageOfParagraph } = await extractPdfParagraphsWithPages(pdf);
+  if (!paragraphs.length) throw new Error(t('import.noText'));
+
+  const chapters = [];
+  for (let m = 0; m < marks.length; m++) {
+    const startPage = marks[m].pageIndex;
+    const endPage = m + 1 < marks.length ? marks[m + 1].pageIndex : Infinity;
+    let startIdx = pageOfParagraph.findIndex(pg => pg >= startPage);
+    if (startIdx === -1) continue;
+    let endIdx = pageOfParagraph.findIndex(pg => pg >= endPage);
+    if (endIdx === -1) endIdx = paragraphs.length;
+    const body = paragraphs.slice(startIdx, endIdx);
+    if (!body.length) continue;
+    chapters.push({ id: 'pdf-' + (chapters.length + 1), title: marks[m].title, dateRange: '', paragraphs: body });
+  }
+  if (!chapters.length) return null;
+
+  // anything before the first mapped chapter (cover page, title page, front
+  // matter) becomes an untitled leading chapter rather than being dropped
+  const firstStartIdx = pageOfParagraph.findIndex(pg => pg >= marks[0].pageIndex);
+  if (firstStartIdx > 0) {
+    chapters.unshift({ id: 'pdf-0', title: '', dateRange: '', paragraphs: paragraphs.slice(0, firstStartIdx) });
+  }
+  return { bookTitle, chapters };
+}
+
+// ============================================================
+// EPUB import (epub.js). Unlike txt/docx/pdf, an epub already has real
+// chapter boundaries (its table of contents / spine), so this produces a
+// chapters array directly instead of one flat text blob.
+// ============================================================
+function flattenEpubToc(items, out) {
+  out = out || [];
+  (items || []).forEach(item => {
+    out.push({ href: item.href, label: (item.label || '').trim() });
+    if (item.subitems && item.subitems.length) flattenEpubToc(item.subitems, out);
+  });
+  return out;
+}
+
+function extractParagraphsFromEpubDoc(doc) {
+  const blocks = doc.querySelectorAll('p, li, blockquote, h1, h2, h3, h4, h5, h6');
+  const paragraphs = [];
+  blocks.forEach(el => {
+    const text = el.textContent.replace(/\s+/g, ' ').trim();
+    if (text) paragraphs.push(text);
+  });
+  if (paragraphs.length) return paragraphs;
+  // fallback for chapters with no recognizable block structure at all
+  const text = ((doc.body && doc.body.textContent) || doc.textContent || '').trim();
+  return text ? textToParagraphs(text) : [];
+}
+
+function withTimeout(promise, ms, errorMessage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(errorMessage)), ms)),
+  ]);
+}
+
+async function extractEpubChapters(arrayBuffer) {
+  if (!window.ePub) throw new Error(t('import.epubjsFail'));
+  const book = window.ePub(arrayBuffer);
+  // a malformed/corrupt epub can leave epub.js's internal parsing promise
+  // stuck forever rather than rejecting -- never let that hang the UI
+  await withTimeout(book.ready, 20000, t('import.epubTimeout'));
+
+  const nav = await book.loaded.navigation;
+  const metadata = await book.loaded.metadata;
+  const tocEntries = flattenEpubToc(nav && nav.toc);
+  const sections = tocEntries.length
+    ? tocEntries
+    : book.spine.items.map(item => ({ href: item.href, label: '' }));
+
+  const chapters = [];
+  let idx = 0;
+  for (const entry of sections) {
+    idx++;
+    const section = book.spine.get(entry.href);
+    if (!section) continue;
+    let paragraphs = [];
+    try {
+      const doc = await section.load(book.load.bind(book));
+      paragraphs = extractParagraphsFromEpubDoc(doc);
+    } finally {
+      if (section.unload) section.unload();
+    }
+    if (!paragraphs.length) continue;
+    chapters.push({
+      id: 'epub-' + idx,
+      title: entry.label || (metadata && metadata.title) || '',
+      dateRange: '',
+      paragraphs,
+    });
+  }
+  if (!chapters.length) throw new Error(t('import.noText'));
+  return { bookTitle: (metadata && metadata.title) || '', chapters };
+}
+
+// ============================================================
+// Best-effort heading detection (for optional "split into chapters" on import)
+//
+// "Short, standalone, doesn't end like a sentence" identifies a chapter
+// heading and also identifies a title page, a running index, and a table of
+// contents. On the Satow diaries (391 pages, no embedded outline) that gave
+// five chapters, of which four were called things like "In Two Volumes" and
+// "396 Gosselin, Martin I: 20".
+//
+// What separates a real heading from those is context, not the line itself:
+// a chapter heading sits ALONE between two runs of prose, while front matter
+// and indexes come in runs of short lines. So the shape test below is only
+// the first pass; a candidate then has to survive its neighbourhood.
+// ============================================================
+
+// Index and register lines: "Gosselin, Martin I: 20", "205, 211, 216, 227".
+// A volume/page reference or a run of bare numbers is never a chapter title.
+const INDEX_LINE_RE = /\b[IVXLC]+:\s*\d|\d+\s*,\s*\d+\s*,\s*\d+/;
+
+// A paragraph long enough to be body text rather than another heading, a
+// byline, or a page fragment.
+const HEADING_BODY_MIN_CHARS = 80;
+// Two headings this close together are a list of headings, not two chapters.
+const HEADING_MIN_GAP = 3;
+// A run of this many short lines in a row is a title page, a table of
+// contents, or an index -- never a chapter heading. Two in a row stays
+// allowed: a chapter heading is very often preceded by the signature line
+// closing the previous chapter ("Grete Litzmann", then "Einleitung"), and
+// the "must be followed by body text" test below picks the right one of the
+// two on its own.
+const HEADING_MAX_RUN = 3;
+// Above this share of the document, "headings" are noise however they look --
+// splitting on them would shatter the text instead of structuring it.
+const HEADING_MAX_SHARE = 0.15;
+
+function looksLikeHeadingLine(p) {
+  if (!p || p.length > 60) return false;
+  // Test for sentence-ending punctuation only after peeling off closing
+  // quotes and trailing dashes. A line of dialogue ("»Und hat der Kaiser
+  // wirklich dreihundert Frauen?«") and a wistful "Vergangenheit! –" both end
+  // like sentences; with only the last character examined, both looked like
+  // chapter headings. Eight of them did, in Briefe die ihn nicht erreichten.
+  const core = p.replace(/[\s»«"'“”’–—]+$/, '');
+  if (/[.!?…,;:]$/.test(core)) return false;
+  if (!/^[A-ZÀ-ÖØ-Þ0-9"'«»]/.test(p)) return false;
+  if (p.split(/\s+/).length > 10) return false; // title-like: ~10 words at most
+  if (INDEX_LINE_RE.test(p)) return false;
+  return true;
+}
+
+function detectHeadingIndices(paragraphs) {
+  const shaped = [];
+  const isCandidate = [];
+  for (let i = 0; i < paragraphs.length; i++) {
+    const ok = looksLikeHeadingLine(paragraphs[i].trim());
+    isCandidate[i] = ok;
+    if (ok) shaped.push(i);
+  }
+
+  // How many candidates in a row this one belongs to.
+  function runLengthAt(i) {
+    let n = 1;
+    for (let j = i - 1; isCandidate[j]; j--) n++;
+    for (let j = i + 1; isCandidate[j]; j++) n++;
+    return n;
+  }
+
+  const accepted = [];
+  for (const i of shaped) {
+    if (runLengthAt(i) >= HEADING_MAX_RUN) continue;
+    // Must actually introduce something.
+    const next = (paragraphs[i + 1] || '').trim();
+    if (next.length < HEADING_BODY_MIN_CHARS) continue;
+    if (accepted.length && i - accepted[accepted.length - 1] < HEADING_MIN_GAP) continue;
+    accepted.push(i);
+  }
+
+  // Only meaningful once there are enough headings for the ratio to say
+  // anything: three headings in a ten-paragraph excerpt is a plausible
+  // document, not noise.
+  if (accepted.length > 3 && accepted.length > paragraphs.length * HEADING_MAX_SHARE) return [];
+  return accepted;
+}
+
+// Splits a flat paragraph array into chapters using the given heading
+// paragraph indices. Any paragraphs before the first heading become an
+// untitled leading chapter (only kept if non-empty).
+function splitParagraphsIntoChapters(paragraphs, headingIndices) {
+  const chapters = [];
+  let cursor = 0;
+  if (headingIndices.length && headingIndices[0] > 0) {
+    chapters.push({
+      id: 'custom-0',
+      title: '',
+      dateRange: '',
+      paragraphs: paragraphs.slice(0, headingIndices[0]),
+    });
+    cursor = headingIndices[0];
+  }
+  for (let h = 0; h < headingIndices.length; h++) {
+    const start = headingIndices[h];
+    const end = h + 1 < headingIndices.length ? headingIndices[h + 1] : paragraphs.length;
+    const title = paragraphs[start].trim();
+    const body = paragraphs.slice(start + 1, end);
+    if (body.length) {
+      chapters.push({ id: 'custom-' + (chapters.length + 1), title, dateRange: '', paragraphs: body });
+    }
+  }
+  if (!chapters.length) {
+    chapters.push({ id: 'custom-0', title: '', dateRange: '', paragraphs });
+  }
+  return chapters;
+}
+
+// ============================================================
+// File import: .txt / .docx / .pdf
+// ============================================================
+const importStatusEl = () => document.getElementById('import-status');
+
+function setImportStatus(msg, kind) {
+  const el = importStatusEl();
+  el.textContent = msg;
+  el.className = 'import-status' + (kind ? ' ' + kind : '');
+}
+
+// Best-effort title fallback for imports that end up going through the
+// plain-text textarea path (.txt/.docx/PDF-without-outline), which has no
+// title of its own to offer -- used by applyTextAsNewDocument() below.
+let lastImportedFileTitle = '';
+
+async function handleImportedFile(file) {
+  if (!file) return;
+  const name = file.name || '';
+  const ext = name.split('.').pop().toLowerCase();
+  lastImportedFileTitle = name.replace(/\.[^.]+$/, '');
+
+  setImportStatus(t('import.parsing', { name }), '');
+
+  try {
+    if (ext === 'epub') {
+      if (!window.ePub) throw new Error(t('import.epubjsFail'));
+      const arrayBuffer = await file.arrayBuffer();
+      const { bookTitle: epubTitle, chapters: newChapters } = await extractEpubChapters(arrayBuffer);
+      if (!await applyNewChapters(newChapters, epubTitle)) return;
+      const totalChars = newChapters.reduce((sum, c) => sum + c.paragraphs.join('').length, 0);
+      setImportStatus(t('import.epubApplied', { name, count: newChapters.length, chars: totalChars.toLocaleString() }), 'success');
+      return;
+    }
+
+    let text = '';
+    if (ext === 'txt') {
+      text = await file.text();
+    } else if (ext === 'docx') {
+      if (!window.mammoth) throw new Error(t('import.mammothFail'));
+      const arrayBuffer = await file.arrayBuffer();
+      const result = await mammoth.extractRawText({ arrayBuffer });
+      text = result.value;
+    } else if (ext === 'pdf') {
+      if (!window.pdfjsLib) throw new Error(t('import.pdfjsFail'));
+      const arrayBuffer = await file.arrayBuffer();
+      pdfUnmappableGlyphCount = 0;
+      // prefer the PDF's own embedded outline/bookmarks over the generic
+      // paragraph-shape heading heuristic when it's present and usable
+      const outlineResult = await extractPdfChapters(arrayBuffer);
+      if (outlineResult) {
+        if (!await applyNewChapters(outlineResult.chapters, outlineResult.bookTitle || lastImportedFileTitle)) return;
+        const totalChars = outlineResult.chapters.reduce((sum, c) => sum + c.paragraphs.join('').length, 0);
+        const glyphNote = pdfUnmappableGlyphCount > 0 ? t('import.pdfGlyphWarning', { count: pdfUnmappableGlyphCount }) : '';
+        setImportStatus(t('import.pdfApplied', { name, count: outlineResult.chapters.length, chars: totalChars.toLocaleString() }) + glyphNote, 'success');
+        return;
+      }
+      text = await extractPdfText(await file.arrayBuffer());
+    } else {
+      throw new Error(t('import.unsupportedType', { ext }));
+    }
+
+    text = text.trim();
+    if (!text) {
+      // A PDF with pages but no extractable text is a scan, not an empty file.
+      // Saying so (and naming OCR) is far more useful than "no text found",
+      // which reads like the importer is broken.
+      const scanned = ext === 'pdf' && pdfLastPageCount > 0;
+      setImportStatus(scanned ? t('import.scannedPdf', { pages: pdfLastPageCount }) : t('import.noText'), 'error');
+      return;
+    }
+
+    document.getElementById('raw-text-area').value = text;
+    const glyphNote = (ext === 'pdf' && pdfUnmappableGlyphCount > 0) ? t('import.pdfGlyphWarning', { count: pdfUnmappableGlyphCount }) : '';
+    setImportStatus(t('import.extracted', { name, count: text.length.toLocaleString() }) + glyphNote, 'success');
+  } catch (err) {
+    console.error(err);
+    setImportStatus(t('import.parseFailed', { msg: err.message || String(err) }), 'error');
+  }
+}
+
+function wireFileImport() {
+  const dropZone = document.getElementById('file-drop-zone');
+  const fileInput = document.getElementById('file-input');
+
+  dropZone.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) handleImportedFile(file);
+  });
+
+  ['dragenter', 'dragover'].forEach(evt => {
+    dropZone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+  });
+  ['dragleave', 'drop'].forEach(evt => {
+    dropZone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+    });
+  });
+  dropZone.addEventListener('drop', (e) => {
+    const file = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) handleImportedFile(file);
+  });
+}
+
+// Common "swap in a whole new set of chapters" logic, shared by the plain
+// text/paste flow and by imports that already know their own chapter
+// boundaries (EPUB). Always becomes a new document in the library, so
+// importing a file never silently overwrites a previously-saved document's
+// content or cache. Always resets bookTitle too -- this used to only assign
+// it when newBookTitle was truthy, which meant a document with no usable
+// title (no PDF metadata, a plain .txt/.docx, pasted text) silently kept
+// whatever title the PREVIOUS document had, instead of getting its own.
+//
+// Renders before it saves, and returns whether the save actually succeeded.
+// Both matter: persisting is asynchronous now, and a book big enough to fail
+// the write is exactly the book the reader most wants to see on screen. The
+// caller must not announce success on a false return -- that combination
+// (cheerful message, nothing stored) is how importing a 1M-character PDF used
+// to look like it had simply done nothing.
+async function applyNewChapters(newChapters, newBookTitle) {
+  currentDocId = generateDocId();
+  bookTitle = newBookTitle || t('import.untitledDocument');
+  chapters = newChapters;
+  currentChapterIndex = 0;
+  syncFromCurrentChapter();
+  cache.clear();
+  rebuildParagraphSentences();
+  renderPage(0);
+  renderTocList();
+  populateChapterSelect();
+  syncTitleFieldsFromState();
+  document.getElementById('raw-text-area').value = paragraphsToText(PARAGRAPHS);
+  const saved = await saveCurrentDocumentContent();
+  renderDocLibraryList(); // after the save, so the list shows what is really there
+  return saved;
+}
+
+// Updates the CURRENT document's chapters in place (no new library entry).
+// Used by the "保存到当前文档" button for touch-up edits to already-loaded
+// text. The built-in book can be edited this way too; "载入示例文本" is the
+// reset button if that goes wrong.
+async function updateCurrentDocumentChapters(newChapters) {
+  // Saving "into" the empty placeholder has to mint a real document id, or
+  // saveCurrentDocumentContent() would refuse to persist it.
+  if (currentDocId === EMPTY_DOC_ID) currentDocId = generateDocId();
+  chapters = newChapters;
+  currentChapterIndex = Math.min(currentChapterIndex, chapters.length - 1);
+  syncFromCurrentChapter();
+  rebuildParagraphSentences();
+  renderPage(0);
+  renderTocList();
+  populateChapterSelect();
+  syncTitleFieldsFromState();
+  document.getElementById('raw-text-area').value = paragraphsToText(PARAGRAPHS);
+  const saved = await saveCurrentDocumentContent();
+  renderDocLibraryList();
+  return saved;
+}
+
+// `forNewDocument` decides where the single-chapter case gets its heading from.
+// Saving into the current document keeps that document's own chapter title and
+// dates (this is the "I touched up the text" path). A *new* document starts
+// untitled instead of inheriting the open document's chapter heading, which is
+// otherwise how an imported book ends up with a chapter called "Einleitung"
+// borrowed from whatever was on screen at the time.
+function parseTextareaIntoChapters(forNewDocument) {
+  const raw = document.getElementById('raw-text-area').value;
+  const paras = textToParagraphs(raw);
+  if (!paras.length) {
+    setImportStatus(t('import.emptyTextarea'), 'error');
+    return null;
+  }
+  const wantSplit = document.getElementById('split-chapters-checkbox').checked;
+  if (wantSplit) {
+    const headingIndices = detectHeadingIndices(paras);
+    return splitParagraphsIntoChapters(paras, headingIndices);
+  }
+  return [{
+    id: 'custom-0',
+    title: forNewDocument ? '' : chapterTitle,
+    dateRange: forNewDocument ? '' : chapterDates,
+    paragraphs: paras,
+  }];
+}
+
+async function applyTextAsNewDocument() {
+  const newChapters = parseTextareaIntoChapters(true);
+  if (!newChapters) return false;
+  const paraCount = newChapters.reduce((sum, c) => sum + c.paragraphs.length, 0);
+  const saved = await applyNewChapters(newChapters, lastImportedFileTitle);
+  lastImportedFileTitle = ''; // one-shot: don't silently reuse it for the next paste
+  if (!saved) return false; // reportStorageError() already said what went wrong
+  const chapterNote = newChapters.length > 1 ? t('import.appliedChapterNote', { n: newChapters.length }) : '';
+  setImportStatus(t('import.appliedNew', { count: paraCount, note: chapterNote }), 'success');
+  return true;
+}
+
+async function applyTextToCurrentDocument() {
+  const newChapters = parseTextareaIntoChapters(false);
+  if (!newChapters) return false;
+  const paraCount = newChapters.reduce((sum, c) => sum + c.paragraphs.length, 0);
+  const saved = await updateCurrentDocumentChapters(newChapters);
+  if (!saved) return false;
+  const chapterNote = newChapters.length > 1 ? t('import.appliedChapterNote', { n: newChapters.length }) : '';
+  setImportStatus(t('import.appliedUpdate', { count: paraCount, note: chapterNote }), 'success');
+  return true;
+}
+
+// Also the "bring the example back" action: its text is a build-time constant,
+// so restoring a deleted example is just re-creating its library entry.
+async function loadExampleText() {
+  setExampleRemoved(false);
+  loadDefaultBook();
+  currentDocId = BOOK_DOC_ID;
+  document.getElementById('raw-text-area').value = paragraphsToText(PARAGRAPHS);
+  syncTitleFieldsFromState();
+  populateChapterSelect();
+  renderTocList();
+  await saveTextToLocalStorage();
+  renderDocLibraryList();
+  rebuildParagraphSentences();
+  renderPage(0);
+  setImportStatus(t('import.loadedExample'), 'success');
+}
+</script>

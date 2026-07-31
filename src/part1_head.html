@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title data-i18n="app.title">Lingua Lector — 交互式外语精读阅读器</title>
+<!--
+  Favicon, inline as a data URI so the single-file promise holds. It is the
+  product in sixteen pixels: a page of text with ONE SENTENCE lit up, wrapping
+  from the end of one line onto the start of the next. The wrap is the point --
+  a single highlighted bar reads as "a line", and this tool is about the
+  sentence, which almost never fits on one. Colours are the app's own --accent
+  and --highlight. Same artwork as docs/logo.svg; edit both together.
+-->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%238a5a3f'/%3E%3Cg fill='%23ffffff' fill-opacity='0.5'%3E%3Crect x='6' y='6' width='20' height='3' rx='1.5'/%3E%3Crect x='6' y='11.7' width='7' height='3' rx='1.5'/%3E%3Crect x='20' y='17.4' width='6' height='3' rx='1.5'/%3E%3Crect x='6' y='23.1' width='14' height='3' rx='1.5'/%3E%3C/g%3E%3Cg fill='%23f6e6c8'%3E%3Crect x='14.5' y='11.4' width='11.5' height='3.6' rx='1.8'/%3E%3Crect x='6' y='17.1' width='12.5' height='3.6' rx='1.8'/%3E%3C/g%3E%3C/svg%3E">
+<style>
+  :root {
+    --paper: #ffffff;
+    --paper-edge: #f2f2f0;
+    --ink: #232323;
+    --ink-soft: #62615d;
+    --rule: #e2e0da;
+    --accent: #8a5a3f;
+    --accent-soft: #c98a63;
+    --accent-hover: #7a4c34;
+    --on-accent: #ffffff;
+    --highlight: #f6e6c8;
+    --panel-bg: #ffffff;
+    --shadow: rgba(20, 20, 20, 0.10);
+    --danger: #96382a;
+    --danger-bg: #fbe9e4;
+    --success-ink: #3f7a4a;
+    --warning-bg: #fff6e0;
+    --warning-border: #e8cf8a;
+    --warning-ink: #6b5313;
+    --input-bg: #ffffff;
+    --tab-bg: #eeece7;
+    --overlay-bg: rgba(20, 20, 20, 0.45);
+    --quote-italic-ink: #4a3f2e;
+    --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, "Noto Serif SC", serif;
+    --sans: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --reading-font-size: 19px;
+    --reading-font-family: var(--serif);
+  }
+
+  /* dark theme: automatically applied when the OS prefers dark and the user
+     hasn't explicitly picked a theme yet (no data-theme attribute set) */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+      --paper: #1e1c19;
+      --paper-edge: #171512;
+      --ink: #e8e0d0;
+      --ink-soft: #b0a48c;
+      --rule: #3a352c;
+      --accent: #d0a074;
+      --accent-soft: #a97a52;
+      --accent-hover: #e0b488;
+      --on-accent: #2b2620;
+      --highlight: #4a3f28;
+      --panel-bg: #262320;
+      --shadow: rgba(0, 0, 0, 0.4);
+      --danger: #e0836a;
+      --danger-bg: #3a2420;
+      --success-ink: #7fbf8a;
+      --warning-bg: #3a2f14;
+      --warning-border: #6b5313;
+      --warning-ink: #e8cf8a;
+      --input-bg: #2c2822;
+      --tab-bg: #322c22;
+      --overlay-bg: rgba(0, 0, 0, 0.6);
+      --quote-italic-ink: #cabc9e;
+    }
+  }
+  /* explicit theme picked in settings (data-theme attribute set by JS) */
+  :root[data-theme="dark"] {
+    --paper: #1e1c19;
+    --paper-edge: #171512;
+    --ink: #e8e0d0;
+    --ink-soft: #b0a48c;
+    --rule: #3a352c;
+    --accent: #d0a074;
+    --accent-soft: #a97a52;
+    --accent-hover: #e0b488;
+    --on-accent: #2b2620;
+    --highlight: #4a3f28;
+    --panel-bg: #262320;
+    --shadow: rgba(0, 0, 0, 0.4);
+    --danger: #e0836a;
+    --danger-bg: #3a2420;
+    --success-ink: #7fbf8a;
+    --warning-bg: #3a2f14;
+    --warning-border: #6b5313;
+    --warning-ink: #e8cf8a;
+    --input-bg: #2c2822;
+    --tab-bg: #322c22;
+    --overlay-bg: rgba(0, 0, 0, 0.6);
+    --quote-italic-ink: #cabc9e;
+  }
+  :root[data-theme="sepia"] {
+    --paper: #f4ecd8;
+    --paper-edge: #ebe0c4;
+    --ink: #3a2f1d;
+    --ink-soft: #6b5a3d;
+    --rule: #d9c9a0;
+    --accent: #8a5a3f;
+    --accent-soft: #c98a63;
+    --accent-hover: #7a4c34;
+    --on-accent: #ffffff;
+    --highlight: #e8d190;
+    --panel-bg: #f7f0dc;
+    --shadow: rgba(60, 45, 20, 0.15);
+    --danger: #96382a;
+    --danger-bg: #f3ddc9;
+    --success-ink: #3f7a4a;
+    --warning-bg: #f3e2ae;
+    --warning-border: #cbab5e;
+    --warning-ink: #5c4712;
+    --input-bg: #fbf5e6;
+    --tab-bg: #e8dbb6;
+    --overlay-bg: rgba(40, 30, 10, 0.45);
+    --quote-italic-ink: #4a3f2e;
+  }
+  :root[data-theme="light"] {
+    --paper: #ffffff;
+    --paper-edge: #f2f2f0;
+    --ink: #232323;
+    --ink-soft: #62615d;
+    --rule: #e2e0da;
+    --accent: #8a5a3f;
+    --accent-soft: #c98a63;
+    --accent-hover: #7a4c34;
+    --on-accent: #ffffff;
+    --highlight: #f6e6c8;
+    --panel-bg: #ffffff;
+    --shadow: rgba(20, 20, 20, 0.10);
+    --danger: #96382a;
+    --danger-bg: #fbe9e4;
+    --success-ink: #3f7a4a;
+    --warning-bg: #fff6e0;
+    --warning-border: #e8cf8a;
+    --warning-ink: #6b5313;
+    --input-bg: #ffffff;
+    --tab-bg: #eeece7;
+    --overlay-bg: rgba(20, 20, 20, 0.45);
+    --quote-italic-ink: #4a3f2e;
+  }
+
+  * { box-sizing: border-box; }
+  .hidden { display: none !important; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--paper-edge);
+    font-family: var(--serif);
+    color: var(--ink);
+    height: 100%;
+  }
+
+  .app {
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ---------- Reading column ---------- */
+  .reader-wrap {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    /* no scrollbar-gutter reservation: fit-height mode's text-container has
+       its own fixed size and overflow:hidden now (see computeColumnLayout in
+       JS), so reader-wrap itself never actually scrolls in that mode and
+       doesn't need gutter space reserved -- doing it anyway just threw the
+       toolbar/reader-inner's auto-margin centering off by half a scrollbar's
+       width for no benefit */
+    background: var(--paper);
+    scroll-behavior: smooth;
+    /* column flex (not a percentage min-height on .reader-inner) is what
+       makes .reader-inner reliably fill "whatever's left after .toolbar" --
+       a percentage min-height would resolve against .reader-wrap's FULL
+       height and ignore that .toolbar (a sibling, above it) already eats
+       into that space, overflowing by exactly the toolbar's height */
+    display: flex;
+    flex-direction: column;
+  }
+
+  .reader-inner {
+    position: relative;
+    flex: 1 0 auto;
+    max-width: 720px;
+    width: 100%;
+    margin: 0 auto;
+    /* bottom padding reserves room for the absolutely-positioned pager below
+       so it never collides with the last line of text */
+    padding: 20px 44px 106px;
+    box-sizing: border-box;
+  }
+
+  .book-header {
+    text-align: center;
+    margin-bottom: 8px;
+  }
+
+  .book-title-input, .chapter-title-input, .chapter-dates-input {
+    display: block;
+    width: 100%;
+    text-align: center;
+    border: none;
+    background: transparent;
+    font-family: inherit;
+    color: inherit;
+    outline: none;
+  }
+  .book-title-input {
+    font-size: 14px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    font-family: var(--sans);
+    margin: 0 0 6px;
+  }
+  .chapter-title-input {
+    font-size: 32px;
+    font-weight: 600;
+    margin: 6px 0 2px;
+    letter-spacing: 0.01em;
+  }
+  .chapter-dates-input {
+    font-size: 15px;
+    font-style: italic;
+    color: var(--ink-soft);
+    margin: 0 0 24px;
+  }
+  .book-title-input:focus, .chapter-title-input:focus, .chapter-dates-input:focus {
+    background: var(--highlight);
+    border-radius: 4px;
+  }
+  .add-dates-btn {
+    display: block;
+    margin: 0 auto 24px;
+    font-family: var(--sans);
+    font-size: 12px;
+    border: none;
+    background: none;
+    color: #a89a82;
+    cursor: pointer;
+    padding: 2px 8px;
+    border-radius: 10px;
+  }
+  .add-dates-btn:hover { color: var(--accent); background: var(--highlight); }
+
+  .divider {
+    width: 64px;
+    height: 2px;
+    background: var(--accent-soft);
+    margin: 0 auto 18px;
+    border-radius: 2px;
+  }
+
+  /* ---------- Table of contents: sliding sidebar (Edge-reader style) ---------- */
+  .toc-backdrop {
+    position: fixed;
+    inset: 0;
+    background: var(--overlay-bg);
+    z-index: 95;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s ease;
+  }
+  .toc-backdrop.open { opacity: 1; pointer-events: auto; }
+
+  .toc-sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 320px;
+    max-width: 86vw;
+    background: var(--panel-bg);
+    border-right: 1px solid var(--rule);
+    box-shadow: 6px 0 24px var(--shadow);
+    z-index: 96;
+    display: flex;
+    flex-direction: column;
+    transform: translateX(-100%);
+    transition: transform .2s ease;
+  }
+  .toc-sidebar.open { transform: translateX(0); }
+
+  .toc-sidebar-header {
+    padding: 18px 18px 14px;
+    border-bottom: 1px solid var(--rule);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--sans);
+  }
+  .toc-sidebar-header h2 {
+    font-family: var(--serif);
+    font-size: 15px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0;
+    font-weight: 600;
+  }
+
+  .toc-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    font-family: var(--sans);
+  }
+  .toc-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 12px 18px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--rule);
+    color: var(--ink);
+  }
+  .toc-item:last-child { border-bottom: none; }
+  .toc-item:hover { background: var(--highlight); }
+  .toc-item.current { background: var(--accent); color: var(--on-accent); }
+  .toc-item .toc-title { font-size: 13.5px; font-weight: 600; }
+  .toc-item .toc-dates { font-size: 11.5px; color: inherit; opacity: 0.75; }
+
+  @media (max-width: 900px) {
+    .toc-sidebar { width: 280px; }
+  }
+
+  /* ---------- Document library (settings > 文档 tab) ---------- */
+  .doc-library-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    overflow: hidden;
+    font-family: var(--sans);
+  }
+  .doc-library-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .doc-library-item:last-child { border-bottom: none; }
+  .doc-library-item.current { background: var(--highlight); }
+  .doc-library-item-main { flex: 1; min-width: 0; cursor: pointer; }
+  .doc-library-item-title { font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .doc-library-item-meta { font-size: 11px; color: var(--ink-soft); }
+  .doc-library-item-delete,
+  .doc-library-item-cache {
+    border: none;
+    background: none;
+    color: var(--ink-soft);
+    cursor: pointer;
+    font-size: 15px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    flex-shrink: 0;
+  }
+  .doc-library-item-delete:hover { background: var(--danger-bg); color: var(--danger); }
+  .doc-library-item-cache:hover { background: var(--rule); color: var(--accent); }
+
+  .toolbar {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 14px 24px 0;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--sans);
+    flex-wrap: wrap;
+  }
+
+  .toolbar button, .toolbar select {
+    font-family: var(--sans);
+    font-size: 12.5px;
+    border: 1px solid var(--rule);
+    background: var(--panel-bg);
+    color: var(--ink-soft);
+    padding: 6px 12px;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: all .15s ease;
+    white-space: nowrap;
+  }
+  .toolbar button:hover { border-color: var(--accent-soft); color: var(--accent); }
+  .toolbar button:disabled { opacity: 0.35; cursor: default; }
+  .toolbar button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+  }
+  .toolbar button.primary:hover { background: var(--accent-hover); color: var(--on-accent); }
+  .toolbar .hint {
+    font-size: 12px;
+    color: #a89a82;
+    /* no margin-left:auto -- that pinned it to the far right edge, splitting
+       the row into two edge-anchored clusters (buttons left, hint right)
+       instead of reading as one centered group */
+  }
+  .pager-status {
+    font-family: var(--sans);
+    font-size: 12.5px;
+    color: var(--ink-soft);
+    white-space: nowrap;
+  }
+  .pager-page-input {
+    width: 3em;
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    background: var(--panel-bg);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 1px 4px;
+    text-align: center;
+    -moz-appearance: textfield;
+  }
+  .pager-page-input::-webkit-inner-spin-button,
+  .pager-page-input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .pager-page-input:focus {
+    outline: none;
+    border-color: var(--accent-soft);
+    background: var(--highlight);
+  }
+
+  .bottom-pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    /* pinned to a fixed spot at the bottom of .reader-inner (which fills the
+       viewport height) instead of sitting in-flow directly after the text --
+       otherwise a page with less text moves the pager/divider up, which
+       reads as jittery. Absolute positioning (rather than a flex
+       margin-top:auto) avoids a measurement circularity: computeAvailableHeight()
+       needs a *stable* pager height/position, but an auto margin's resolved
+       value depends on how much text is currently in the container -- exactly
+       the thing being measured. */
+    position: absolute;
+    left: 44px;
+    right: 44px;
+    bottom: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--rule);
+    font-family: var(--sans);
+  }
+  .bottom-pager button {
+    font-family: var(--sans);
+    font-size: 13px;
+    border: 1px solid var(--rule);
+    background: var(--panel-bg);
+    color: var(--ink-soft);
+    padding: 8px 16px;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .bottom-pager button:hover { border-color: var(--accent-soft); color: var(--accent); }
+  .bottom-pager button:disabled { opacity: 0.35; cursor: default; }
+  .bottom-pager .pager-status { font-size: 13.5px; }
+
+  p.para {
+    margin: 0 0 26px;
+    font-size: var(--reading-font-size);
+    font-family: var(--reading-font-family);
+    line-height: 1.85;
+    text-align: left;
+    text-indent: 2em;
+    hyphens: auto;
+    /* browsers default orphans/widows to 2 in a paged/columned context --
+       if fewer than 2 lines of a paragraph would fit at the bottom of the
+       current column, the WHOLE paragraph gets pushed to the next column
+       instead, leaving the rest of the current one blank. Allowing a single
+       line is what lets column-fill:auto actually fill each page tightly. */
+    orphans: 1;
+    widows: 1;
+    break-inside: auto;
+  }
+
+  .sent {
+    cursor: pointer;
+    border-radius: 3px;
+    padding: 0 1px;
+    transition: background-color .12s ease;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+  /* .hover is set from JS on every segment of a sentence: a sentence split by
+     a footnote is several elements, and :hover on one cannot reach the others.
+     :hover stays as the no-JS/again-cheap path for single-segment sentences. */
+  .sent:hover, .sent.hover { background: var(--highlight); }
+  .sent.active, .sent.active.hover { background: var(--accent-soft); color: var(--on-accent); }
+  /* keyboard users must be able to see which sentence they are on */
+  .sent:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  ::selection { background: var(--highlight); }
+
+  .empty-state {
+    text-align: center;
+    padding: 80px 20px;
+    color: #a89a82;
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.8;
+  }
+  .empty-state button {
+    margin-top: 18px;
+    font-family: var(--sans);
+    font-size: 13px;
+    border: 1px solid var(--accent-soft);
+    background: var(--accent);
+    color: var(--on-accent);
+    padding: 10px 22px;
+    border-radius: 22px;
+    cursor: pointer;
+  }
+
+  /* ---------- Side panel (analysis) ---------- */
+  .panel {
+    flex: 0 0 420px;
+    max-width: 420px;
+    background: var(--panel-bg);
+    border-left: 1px solid var(--rule);
+    display: flex;
+    flex-direction: column;
+    font-family: var(--sans);
+    box-shadow: -6px 0 24px var(--shadow);
+    transition: flex-basis .2s ease;
+  }
+  .panel.collapsed { flex: 0 0 0; max-width: 0; overflow: hidden; border-left: none; box-shadow: none; }
+
+  .panel-header {
+    padding: 20px 22px 14px;
+    border-bottom: 1px solid var(--rule);
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .panel-header h2 {
+    font-family: var(--serif);
+    font-size: 15px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0;
+    font-weight: 600;
+  }
+  .panel-close {
+    border: none;
+    background: none;
+    color: var(--ink-soft);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 6px;
+  }
+  .panel-close:hover { background: var(--rule); }
+
+  .panel-quote {
+    padding: 16px 22px;
+    font-family: var(--serif);
+    font-size: 16px;
+    line-height: 1.6;
+    color: var(--ink);
+    border-bottom: 1px solid var(--rule);
+    background: linear-gradient(180deg, var(--paper), var(--panel-bg));
+  }
+
+  /* padding-top is 0 so the sticky .section-tabs bar can sit flush against the
+     scrollport top; without that, text scrolling through the 4px gap above it
+     was visible. Blocks that need breathing room bring their own spacing. */
+  .panel-body { flex: 1; overflow-y: auto; padding: 0 22px 32px; }
+  .panel-empty {
+    padding: 60px 22px;
+    text-align: center;
+    color: #b0a288;
+    font-size: 14px;
+    line-height: 1.7;
+  }
+
+  /* The tab bar is sticky, so the analysis text scrolls *underneath* it. Its
+     spacing must therefore be padding, not margin: a transparent margin band
+     above/below let the scrolling text show through the gap between the two
+     tab buttons and just under the bar. Padding is painted, so the bar stays
+     an opaque strip in all three themes. */
+  .section-tabs {
+    display: flex;
+    gap: 6px;
+    position: sticky;
+    top: 0;
+    background: var(--panel-bg);
+    padding: 16px 0 10px;
+    z-index: 2;
+  }
+  .tab-btn {
+    flex: 1;
+    font-family: var(--sans);
+    font-size: 12.5px;
+    padding: 8px 4px;
+    border: none;
+    background: var(--tab-bg);
+    color: var(--ink-soft);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .tab-btn.active { background: var(--accent); color: var(--on-accent); }
+  /* not flex:1 -- it sits beside the two tabs without taking a third of the bar */
+  .reanalyze-btn {
+    flex: 0 0 auto;
+    font-size: 14px;
+    line-height: 1;
+    padding: 8px 10px;
+    border: 1px solid var(--rule);
+    background: var(--panel-bg);
+    color: var(--ink-soft);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .reanalyze-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ---------- Follow-up chat ---------- */
+  .chat-section {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--rule);
+  }
+  .chat-thread {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .chat-bubble {
+    font-size: 13.5px;
+    line-height: 1.6;
+    padding: 9px 12px;
+    border-radius: 10px;
+    max-width: 92%;
+  }
+  .chat-bubble.chat-user {
+    align-self: flex-end;
+    background: var(--accent);
+    color: var(--on-accent);
+    border-bottom-right-radius: 3px;
+  }
+  .chat-bubble.chat-assistant {
+    align-self: flex-start;
+    background: var(--tab-bg);
+    color: var(--ink);
+    border-bottom-left-radius: 3px;
+  }
+  .chat-bubble.chat-assistant .analysis-md { font-size: 13.5px; }
+  .chat-bubble.chat-pending { display: flex; align-items: center; }
+  .chat-bubble.chat-error { background: var(--danger-bg); color: var(--danger); }
+  .chat-input-row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+  }
+  .chat-input-row textarea {
+    flex: 1;
+    resize: vertical;
+    min-height: 36px;
+    max-height: 120px;
+    font-family: var(--sans);
+    font-size: 13px;
+    padding: 8px 10px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: var(--input-bg);
+    color: var(--ink);
+    outline: none;
+  }
+  .chat-input-row textarea:focus { border-color: var(--accent-soft); }
+  .chat-input-row button { white-space: nowrap; }
+
+  .loading-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--ink-soft);
+    font-size: 13px;
+    padding: 18px 0;
+  }
+  .spinner {
+    width: 15px; height: 15px;
+    border: 2px solid var(--rule);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .8s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .analysis-md { font-size: 14px; line-height: 1.75; color: var(--ink); }
+  .analysis-md h3, .analysis-md h4 {
+    font-family: var(--serif);
+    font-size: 14.5px;
+    color: var(--accent);
+    margin: 18px 0 6px;
+    font-weight: 600;
+  }
+  .analysis-md h3:first-child, .analysis-md h4:first-child { margin-top: 0; }
+  .analysis-md p { margin: 0 0 10px; }
+  .analysis-md ul, .analysis-md ol { margin: 6px 0 12px; padding-left: 20px; }
+  .analysis-md li { margin-bottom: 6px; }
+  .analysis-md strong { color: var(--accent); font-weight: 600; }
+  .analysis-md code {
+    background: var(--highlight);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 0.9em;
+  }
+  .analysis-md .de { font-family: var(--serif); font-style: italic; color: var(--quote-italic-ink); }
+
+  .error-box {
+    margin-top: 16px;
+    background: var(--danger-bg);
+    color: var(--danger);
+    padding: 12px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .retry-btn {
+    margin-top: 10px;
+    font-family: var(--sans);
+    font-size: 12.5px;
+    border: 1px solid var(--danger);
+    background: var(--panel-bg);
+    color: var(--danger);
+    padding: 5px 12px;
+    border-radius: 16px;
+    cursor: pointer;
+  }
+
+  /* ---------- Settings modal ---------- */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: var(--overlay-bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 20px;
+  }
+  .modal-overlay.hidden { display: none; }
+
+  .modal {
+    background: var(--panel-bg);
+    border-radius: 14px;
+    max-width: 560px;
+    width: 100%;
+    max-height: 88vh;
+    overflow-y: auto;
+    font-family: var(--sans);
+    box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+  }
+  .modal.modal-wide { max-width: 720px; }
+  .modal-header {
+    padding: 22px 26px 14px;
+    border-bottom: 1px solid var(--rule);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .modal-header h2 {
+    font-family: var(--serif);
+    font-size: 19px;
+    margin: 0;
+    color: var(--ink);
+  }
+  .modal-body { padding: 20px 26px 26px; }
+  .modal-close {
+    border: none;
+    background: none;
+    font-size: 20px;
+    color: var(--ink-soft);
+    cursor: pointer;
+    padding: 2px 8px;
+    border-radius: 6px;
+  }
+  .modal-close:hover { background: var(--rule); }
+
+  .settings-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .settings-tab-btn {
+    flex: 1 1 0;
+    min-width: 0;
+    font-family: var(--sans);
+    font-size: 13px;
+    padding: 12px 6px;
+    border: none;
+    background: none;
+    color: var(--ink-soft);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: center;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color .15s ease;
+  }
+  .settings-tab-btn:hover { color: var(--accent); }
+  .settings-tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  .settings-tab-panel { display: none; }
+  .settings-tab-panel.active { display: block; }
+
+  .field-group { margin-bottom: 22px; }
+  .field-group label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 6px;
+  }
+  .field-group .field-desc {
+    font-size: 12px;
+    color: var(--ink-soft);
+    margin: 4px 0 8px;
+    line-height: 1.6;
+  }
+  .field-group input[type="text"],
+  .field-group input[type="password"],
+  .field-group input[type="number"],
+  .field-group select,
+  .field-group textarea {
+    width: 100%;
+    font-family: var(--sans);
+    font-size: 13.5px;
+    padding: 9px 12px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: var(--input-bg);
+    color: var(--ink);
+    outline: none;
+  }
+  .field-group input:focus, .field-group select:focus, .field-group textarea:focus {
+    border-color: var(--accent-soft);
+  }
+  .field-row { display: flex; gap: 12px; }
+  .field-row > * { flex: 1; }
+
+  .radio-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .radio-chip {
+    font-size: 12.5px;
+    padding: 6px 13px;
+    border: 1px solid var(--rule);
+    border-radius: 16px;
+    cursor: pointer;
+    background: var(--input-bg);
+    color: var(--ink-soft);
+    user-select: none;
+  }
+  .radio-chip.selected { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+  .key-warning {
+    background: var(--warning-bg);
+    border: 1px solid var(--warning-border);
+    color: var(--warning-ink);
+    font-size: 12px;
+    line-height: 1.6;
+    padding: 10px 12px;
+    border-radius: 8px;
+    margin-top: 8px;
+  }
+
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .btn {
+    font-family: var(--sans);
+    font-size: 13px;
+    padding: 9px 18px;
+    border-radius: 20px;
+    cursor: pointer;
+    border: 1px solid var(--rule);
+    background: var(--input-bg);
+    color: var(--ink-soft);
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .btn:hover { border-color: var(--accent-soft); }
+  .btn.primary:hover { background: var(--accent-hover); }
+
+  .file-drop {
+    border: 2px dashed var(--rule);
+    border-radius: 10px;
+    padding: 22px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--ink-soft);
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .file-drop:hover, .file-drop.dragover { border-color: var(--accent-soft); background: var(--highlight); }
+  .file-drop input[type="file"] { display: none; }
+
+  .import-status {
+    font-size: 12.5px;
+    color: var(--ink-soft);
+    margin-top: 8px;
+    min-height: 18px;
+  }
+  .import-status.error { color: var(--danger); }
+  .import-status.success { color: var(--success-ink); }
+
+  @media (max-width: 900px) {
+    .app { flex-direction: column; }
+    .panel {
+      flex: none; max-width: none; width: 100%; height: 55vh;
+      border-left: none; border-top: 1px solid var(--rule); order: 2;
+    }
+    .panel.collapsed { height: 0; flex: none; max-width: none; width: 100%; }
+    .reader-wrap { order: 1; height: auto; flex: 1 1 auto; }
+    .reader-inner { padding: 20px 20px 106px; }
+    .bottom-pager { left: 20px; right: 20px; }
+    p.para { font-size: 18px; }
+    .toolbar { padding: 12px 20px 0; max-width: none; }
+  }
+  /* Readers who get motion sickness or migraines from animation ask the OS to
+     suppress it. The page-turn transform is the main offender here -- a whole
+     screen of text sliding sideways -- but blanket-disabling every transition
+     is the safe reading of the preference. Paging still works, it just cuts
+     rather than slides. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+    }
+  }
+</style>
+</head>
+<body>
