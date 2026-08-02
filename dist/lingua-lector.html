@@ -985,10 +985,13 @@
     .reader-inner { padding: 14px 14px 100px; }
     .toolbar { padding: 10px 14px 0; }
     .bottom-pager { left: 14px; right: 14px; }
-    /* Looser leading is the only way to make an inline sentence easier to hit
-       with a fingertip -- the target cannot be padded without disturbing the
-       text flow, so the line it sits on is made taller instead. */
-    p.para { font-size: 17px; line-height: 1.95; }
+    /* NOT looser than the desktop 1.85. Extra leading was added here on the
+       theory that it makes a sentence easier to tap; it does the opposite. An
+       inline span's hit area is the text itself, not the line box, so every
+       extra point of leading only widens the dead gap between one tappable
+       strip and the next. Measured by walking elementFromPoint down the
+       column: at 1.95 roughly half the vertical travel missed the text. */
+    p.para { font-size: 17px; }
 
     /* 44px is the smallest reliably tappable target. */
     .pager-prev, .pager-next, .btn, .panel-close, .modal-close {
@@ -1165,6 +1168,7 @@
           </datalist>
           <label style="margin-top:14px;" data-i18n="settings.baseUrlOptionalLabel">接口地址（可选，留空用官方地址）</label>
           <input type="text" id="anthropic-baseurl-input" placeholder="https://api.anthropic.com">
+          <div class="field-desc hidden" data-proxy-hint="anthropic"></div>
           <div class="key-warning" data-i18n="settings.anthropicWarning">
             ℹ️ 本工具已通过 <code>anthropic-dangerous-direct-browser-access</code> 请求头启用浏览器直连，
             正常情况下无需额外代理即可使用。但请注意：把 key 直接放进前端代码/浏览器本地存储，意味着任何能访问这台设备浏览器数据的人
@@ -1181,6 +1185,7 @@
           <input type="password" id="openai-key-input" placeholder="sk-...">
           <label style="margin-top:14px;" data-i18n="settings.baseUrlLabel">接口地址（Base URL）</label>
           <input type="text" id="openai-baseurl-input" placeholder="https://api.openai.com/v1">
+          <div class="field-desc hidden" data-proxy-hint="openai"></div>
           <label style="margin-top:14px;" data-i18n="settings.modelLabel">模型</label>
           <input type="text" id="openai-model-input" list="openai-model-suggestions" placeholder="gpt-5.6-luna">
           <datalist id="openai-model-suggestions">
@@ -1203,6 +1208,7 @@
           <input type="password" id="gemini-key-input" placeholder="AIza...">
           <label style="margin-top:14px;" data-i18n="settings.baseUrlLabel">接口地址（Base URL）</label>
           <input type="text" id="gemini-baseurl-input" placeholder="https://generativelanguage.googleapis.com/v1beta">
+          <div class="field-desc hidden" data-proxy-hint="gemini"></div>
           <label style="margin-top:14px;" data-i18n="settings.modelLabel">模型</label>
           <input type="text" id="gemini-model-input" list="gemini-model-suggestions" placeholder="gemini-3.5-flash-lite">
           <datalist id="gemini-model-suggestions">
@@ -1461,6 +1467,19 @@ const PROXY_CONFIG = (typeof window !== 'undefined' && window.LINGUA_LECTOR_PROX
 function proxyInfoFor(provider) {
   const info = PROXY_CONFIG && PROXY_CONFIG.providers && PROXY_CONFIG.providers[provider];
   return info && info.hasServerKey ? info : null;
+}
+
+// The relay case: server.py is serving this page but holds no key for this
+// provider, so nothing is filled in automatically and the reader has to point
+// Base URL at the proxy by hand. Everyone's first instinct is to type the
+// provider's own address there instead, which routes around the proxy entirely
+// and reproduces the CORS failure they started it to fix -- so the settings
+// panel offers the right URL (see syncProxyHints) rather than leaving it to
+// the README.
+function proxyRelayInfoFor(provider) {
+  const info = PROXY_CONFIG && PROXY_CONFIG.providers && PROXY_CONFIG.providers[provider];
+  if (!info || info.hasServerKey || !info.baseUrl) return null;
+  return info;
 }
 
 // A Base URL pointing somewhere other than the provider's own API host is, in
@@ -2588,6 +2607,8 @@ const I18N = {
     'settings.baseUrlLabel': '接口地址（Base URL）',
     'settings.openaiWarning': 'ℹ️ 部分服务商不允许浏览器直接跨域（CORS）调用其 API——如果遇到"网络请求失败"，通常是这个原因，需要换用允许浏览器直连的服务商，或自建一个允许 CORS 的转发代理。',
     'settings.geminiDesc': '可在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 申请。',
+    'settings.proxyRelayHint': '本机代理 server.py 正在运行。如果服务商拒绝浏览器跨域（CORS）调用，把上面的接口地址改成 {url}，请求就会由它转发（填服务商自己的地址不会经过代理，CORS 错误依旧）。',
+    'settings.proxyFillBtn': '填入代理地址',
     'settings.uiLangLabel': '界面语言',
     'settings.sentenceLangLabel': '原文分句规则（按语言的缩写词表不同）',
     'import.scannedPdf': '这个 PDF 共 {pages} 页，但没有文字层——它是扫描件（纸页的图片）。需要先用 OCR 工具（如 Adobe Acrobat、ABBYY FineReader、ocrmypdf）识别成可选中文字的 PDF，再导入。',
@@ -2721,6 +2742,8 @@ const I18N = {
     'settings.baseUrlLabel': '端點（Base URL）',
     'settings.openaiWarning': 'ℹ️ 部分服務商不允許瀏覽器直接跨網域（CORS）呼叫其 API——如果遇到「網路請求失敗」，通常是這個原因，需要換用允許瀏覽器直連的服務商，或自建一個允許 CORS 的轉發代理。',
     'settings.geminiDesc': '可在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 申請。',
+    'settings.proxyRelayHint': '本機代理 server.py 正在執行。如果服務商拒絕瀏覽器跨域（CORS）呼叫，把上面的端點改成 {url}，請求就會由它轉發（填服務商自己的地址不會經過代理，CORS 錯誤依舊）。',
+    'settings.proxyFillBtn': '填入代理位址',
     'settings.uiLangLabel': '介面語言',
     'settings.sentenceLangLabel': '原文分句規則（依語言的縮寫詞表不同）',
     'import.scannedPdf': '這個 PDF 共 {pages} 頁，但沒有文字層——它是掃描件（紙頁的圖片）。需要先用 OCR 工具（如 Adobe Acrobat、ABBYY FineReader、ocrmypdf）辨識成可選取文字的 PDF，再匯入。',
@@ -2854,6 +2877,8 @@ const I18N = {
     'settings.baseUrlLabel': 'Endpoint (Base URL)',
     'settings.openaiWarning': 'ℹ️ Some providers don\'t allow direct cross-origin (CORS) calls from a browser — that\'s usually why you\'d see a "network request failed" error. Switch to a provider that allows direct browser access, or set up your own CORS-enabled proxy.',
     'settings.geminiDesc': 'Get one at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.proxyRelayHint': 'The local server.py proxy is serving this page. If your provider refuses cross-origin (CORS) calls from a browser, set the Base URL above to {url} and it will relay them (typing the provider\'s own address there bypasses the proxy, and the CORS error stays).',
+    'settings.proxyFillBtn': 'Use the proxy',
     'settings.uiLangLabel': 'Interface language',
     'settings.sentenceLangLabel': 'Sentence-splitting rules (abbreviation list varies by language)',
     'import.scannedPdf': 'This PDF has {pages} pages but no text layer — it is a scan (images of the paper). Run it through OCR first (Adobe Acrobat, ABBYY FineReader, ocrmypdf) so the text becomes selectable, then import it again.',
@@ -2987,6 +3012,8 @@ const I18N = {
     'settings.baseUrlLabel': 'Endpunkt (Base URL)',
     'settings.openaiWarning': 'ℹ️ Manche Anbieter erlauben keine direkten Cross-Origin-Aufrufe (CORS) aus dem Browser — das ist meist der Grund für „Netzwerkanfrage fehlgeschlagen". Wechsle zu einem Anbieter mit direktem Browserzugriff oder richte einen eigenen CORS-fähigen Proxy ein.',
     'settings.geminiDesc': 'Erhältlich im <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.proxyRelayHint': 'Der lokale Proxy server.py liefert diese Seite aus. Wenn Ihr Anbieter Cross-Origin-Aufrufe (CORS) aus dem Browser ablehnt, tragen Sie oben als Endpunkt {url} ein, dann leitet er sie weiter (die Adresse des Anbieters dort umgeht den Proxy, der CORS-Fehler bleibt).',
+    'settings.proxyFillBtn': 'Proxy eintragen',
     'settings.uiLangLabel': 'Oberflächensprache',
     'settings.sentenceLangLabel': 'Satztrennungsregeln (Abkürzungsliste je nach Sprache)',
     'import.scannedPdf': 'Diese PDF hat {pages} Seiten, aber keine Textebene — sie ist ein Scan (Bilder der Buchseiten). Lassen Sie sie zuerst per OCR verarbeiten (Adobe Acrobat, ABBYY FineReader, ocrmypdf), sodass der Text markierbar wird, und importieren Sie sie erneut.',
@@ -3120,6 +3147,8 @@ const I18N = {
     'settings.baseUrlLabel': 'Point d\'accès (Base URL)',
     'settings.openaiWarning': 'ℹ️ Certains fournisseurs n\'autorisent pas les appels cross-origin (CORS) directs depuis un navigateur — c\'est généralement la cause d\'une erreur « échec de la requête réseau ». Passez à un fournisseur autorisant l\'accès direct depuis le navigateur, ou mettez en place votre propre proxy compatible CORS.',
     'settings.geminiDesc': 'À obtenir sur <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.proxyRelayHint': 'Le proxy local server.py sert cette page. Si votre fournisseur refuse les appels cross-origin (CORS) depuis un navigateur, indiquez ci-dessus le point d\'accès {url} et il les relaiera (mettre l\'adresse du fournisseur contourne le proxy, l\'erreur CORS demeure).',
+    'settings.proxyFillBtn': 'Utiliser le proxy',
     'settings.uiLangLabel': 'Langue de l\'interface',
     'settings.sentenceLangLabel': 'Règles de découpage des phrases (liste d\'abréviations selon la langue)',
     'import.scannedPdf': 'Ce PDF compte {pages} pages mais n’a pas de couche de texte : c’est un scan (des images de pages). Passez-le d’abord par un OCR (Adobe Acrobat, ABBYY FineReader, ocrmypdf) pour rendre le texte sélectionnable, puis réimportez-le.',
@@ -3253,6 +3282,8 @@ const I18N = {
     'settings.baseUrlLabel': 'Endpoint (Base URL)',
     'settings.openaiWarning': 'ℹ️ Algunos proveedores no permiten llamadas directas entre orígenes (CORS) desde el navegador — normalmente esa es la causa de un error de "fallo en la solicitud de red". Cambia a un proveedor que permita acceso directo desde el navegador, o configura tu propio proxy compatible con CORS.',
     'settings.geminiDesc': 'Consíguela en <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.proxyRelayHint': 'El proxy local server.py está sirviendo esta página. Si tu proveedor rechaza las llamadas cross-origin (CORS) desde el navegador, pon arriba el endpoint {url} y las retransmitirá (escribir la dirección del proveedor evita el proxy y el error CORS sigue).',
+    'settings.proxyFillBtn': 'Usar el proxy',
     'settings.uiLangLabel': 'Idioma de la interfaz',
     'settings.sentenceLangLabel': 'Reglas de división de frases (la lista de abreviaturas varía según el idioma)',
     'import.scannedPdf': 'Este PDF tiene {pages} páginas pero no capa de texto: es un escaneo (imágenes de las páginas). Pásalo primero por un OCR (Adobe Acrobat, ABBYY FineReader, ocrmypdf) para que el texto sea seleccionable y vuelve a importarlo.',
@@ -3386,6 +3417,8 @@ const I18N = {
     'settings.baseUrlLabel': 'Endpoint (Base URL)',
     'settings.openaiWarning': 'ℹ️ Alcuni provider non consentono chiamate cross-origin (CORS) dirette dal browser — di solito è questa la causa di un errore "richiesta di rete non riuscita". Passa a un provider che consenta l\'accesso diretto dal browser, oppure configura un tuo proxy compatibile con CORS.',
     'settings.geminiDesc': 'Ottienila su <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.proxyRelayHint': 'Il proxy locale server.py sta servendo questa pagina. Se il tuo provider rifiuta le chiamate cross-origin (CORS) dal browser, imposta sopra l\'endpoint {url} e le inoltrerà (inserire l\'indirizzo del provider aggira il proxy e l\'errore CORS resta).',
+    'settings.proxyFillBtn': 'Usa il proxy',
     'settings.uiLangLabel': 'Lingua dell\'interfaccia',
     'settings.sentenceLangLabel': 'Regole di suddivisione delle frasi (elenco abbreviazioni diverso per lingua)',
     'import.scannedPdf': 'Questo PDF ha {pages} pagine ma nessun livello di testo: è una scansione (immagini delle pagine). Passalo prima per un OCR (Adobe Acrobat, ABBYY FineReader, ocrmypdf) così il testo diventa selezionabile, poi reimportalo.',
@@ -3519,6 +3552,8 @@ const I18N = {
     'settings.baseUrlLabel': 'Адрес (Base URL)',
     'settings.openaiWarning': 'ℹ️ Некоторые провайдеры не разрешают прямые межсайтовые (CORS) запросы из браузера — обычно именно из-за этого возникает ошибка «сетевой запрос не удался». Переключитесь на провайдера, разрешающего прямой доступ из браузера, либо настройте собственный прокси с поддержкой CORS.',
     'settings.geminiDesc': 'Получить можно в <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.proxyRelayHint': 'Эту страницу отдаёт локальный прокси server.py. Если провайдер отклоняет кросс-доменные (CORS) запросы из браузера, укажите выше адрес {url} — прокси их перешлёт (адрес самого провайдера прокси не задействует, ошибка CORS останется).',
+    'settings.proxyFillBtn': 'Указать прокси',
     'settings.uiLangLabel': 'Язык интерфейса',
     'settings.sentenceLangLabel': 'Правила разбиения на предложения (список сокращений зависит от языка)',
     'import.scannedPdf': 'В этом PDF {pages} страниц, но нет текстового слоя — это скан (изображения страниц). Сначала обработайте его OCR (Adobe Acrobat, ABBYY FineReader, ocrmypdf), чтобы текст стал выделяемым, и импортируйте снова.',
@@ -3652,6 +3687,8 @@ const I18N = {
     'settings.baseUrlLabel': 'エンドポイント（Base URL）',
     'settings.openaiWarning': 'ℹ️ 一部のプロバイダーはブラウザからの直接クロスオリジン（CORS）呼び出しを許可していません。「ネットワークリクエストに失敗しました」というエラーは、たいていこれが原因です。ブラウザからの直接アクセスを許可するプロバイダーに切り替えるか、CORS に対応した独自のプロキシを構築してください。',
     'settings.geminiDesc': '<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> で取得できます。',
+    'settings.proxyRelayHint': 'ローカルの server.py プロキシがこのページを配信しています。プロバイダーがブラウザからのクロスオリジン（CORS）リクエストを拒否する場合は、上のエンドポイントを {url} にすると中継されます（プロバイダー自身のアドレスを入れるとプロキシを通らず、CORS エラーのままです）。',
+    'settings.proxyFillBtn': 'プロキシを入力',
     'settings.uiLangLabel': 'インターフェース言語',
     'settings.sentenceLangLabel': '分文ルール（言語ごとに略語リストが異なります）',
     'import.scannedPdf': 'この PDF は {pages} ページありますが、テキストレイヤーがありません——スキャン画像です。まず OCR（Adobe Acrobat、ABBYY FineReader、ocrmypdf など）でテキストを選択可能にしてから、もう一度読み込んでください。',
@@ -5498,6 +5535,12 @@ async function onSentenceClick(span, sentenceText) {
   const paraIdx = parseInt(span.dataset.paraIdx, 10);
   const contextParagraph = Number.isFinite(paraIdx) ? PARAGRAPHS[paraIdx] : '';
   renderQuote(sentenceText);
+  // Show the spinner *before* any await. Everything below can take a moment or
+  // bail out, and until this call the panel still displays the "click a
+  // sentence" placeholder -- so a tap that was received looked exactly like a
+  // tap that was never received. That is indistinguishable from the app being
+  // broken, and was reported as exactly that.
+  renderLoading();
 
   // A click within the first few milliseconds of opening a chapter would
   // otherwise read an empty map and pay for an analysis already on disk.
@@ -5508,8 +5551,6 @@ async function onSentenceClick(span, sentenceText) {
     renderResult(cache.get(cacheKey), sentenceText);
     return;
   }
-
-  renderLoading();
   try {
     const result = await analyzeSentence(sentenceText, contextParagraph);
     cache.set(cacheKey, result);
@@ -5839,8 +5880,8 @@ function buildSystemPrompt() {
 
 ## ${terms.structure}
 ${transLabel}〈这里填这句话完整、通顺、自然的整句翻译〉
-〈这里填后续列点；其中每个从句的列点写成两行，形如〉
-- 〈从句类型 + 引导词 + 修饰/补充主句的哪个成分〉
+〈这里填后续列点；其中每个从句的列点写成两行，第一行必须以照抄的原文开头，形如〉
+- *〈从原文里逐字照抄的这个从句本身〉* —— 〈用完整的话说明它是什么从句、由什么引导、修饰或补充主句里的哪个成分〉
   ${transLabel}〈这个从句部分的译文〉
 
 ## ${terms.vocab}
@@ -5853,11 +5894,19 @@ ${transLabel}〈这里填这句话完整、通顺、自然的整句翻译〉
   让读者不需要追问就能看懂整句话的意思。再说一次：这个标签必须原样写成 ${transLabel}。
 - 然后另起一句话概括整句大意（不是翻译，是更进一步的内容/语气/言外之意概括）。
 - 然后拆解句子的主干：主句的主语、谓语、宾语分别是什么（可直接引用原文词/短语，用 *斜体* 标出）。
-- 如果有从句（定语从句、状语从句、宾语从句等），逐个说明每个从句的类型、引导词、以及它修饰/补充的是主句中的哪个成分。
-  每一个从句都必须**另起一行**、按下面这个模板补上这个从句本身的译文（只说明类型和修饰对象、不给译文，读者仍然不知道这半句在说什么）：
-  \`${transLabel}〈这个从句部分的译文〉\`
-  这个标签同样必须一字不差地写成 ${transLabel}。
-- 如果句子里有插入语、同位语、分词结构或省略成分，也请指出；其中自成意群的部分（如同位语、插入语）同样按上面的模板附上 ${transLabel} 一行。
+- 如果有从句（关系从句、状语从句、宾语从句等），逐个说明，每个从句一个列点，且必须同时满足下面三条：
+  1. **列点必须以这个从句在原文里的连续文字开头，逐字照抄并用 *斜体* 标出。** 只写「关系从句」而不给出原文，读者根本不知道你在讲哪半句；不要改写、不要只写引导词、不要用省略号糊弄（只有从句特别长时才允许把中间部分省略）。
+  2. 然后用**完整的话**说明：它是什么类型的从句、引导词是哪个、修饰或补充的是主句里的哪个成分。**禁止把上面模板里的示意文字当成答案照抄**——像「定语从句 + 引导词 + 修饰主句中的成分」这种用加号把模板项目串起来的写法是错误输出，必须换成这句话里真实的内容。
+  3. 再**另起一行**、按下面这个模板补上这个从句本身的译文（只说明类型和修饰对象、不给译文，读者仍然不知道这半句在说什么）：
+     \`${transLabel}〈这个从句部分的译文〉\`
+     这个标签同样必须一字不差地写成 ${transLabel}。
+- **判定「是不是从句」只有一条标准：这个结构里有没有属于它自己的定式动词（随主语变位的那种动词）。** 没有定式动词的成分一律不是从句，必须用它自己的名称称呼：
+  - 带扩展成分的分词定语／形容词定语（如德语 *die ihnen plötzlich gegebenen freien Staatsformen* 里的 *ihnen plötzlich gegebenen*）叫「分词定语（扩展定语）」，**不是**关系从句，也不要说成「省略了关系代词的定语从句」；
+  - zu + 不定式的结构叫「不定式短语」；介词短语、同位语、独立分词结构同理。
+  拿不准时宁可写「这里没有从句，只有一个扩展定语」，也不要把没有定式动词的成分称作从句。
+- **从句的名称要用被分析语言自己的语法体系里的术语，不要笼统地套用英语语法的说法。** 由关系代词／关系副词引导的从句（德语 Relativsatz：*der/die/das*、*welcher*、*wo*、*was*…；法语 proposition relative；俄语 определительное придаточное 等）一律叫**关系从句**；「定语从句」是英语语法的叫法，而且只描述了它最常见的那一种功能——关系从句也可以不作定语（如德语的自由关系从句 *Wer das sagt, irrt sich.* 整个从句作主语），这时更不能叫定语从句。要说明它在句中的功能就单独说（「作 *Paraguay* 的后置定语」），别把功能塞进名称里。其它类型同理：状语从句要进一步说清是时间／原因／让步／条件等哪一种。
+- 动词的**语气／形态**（如德语第一虚拟式 Konjunktiv I 表转述、第二虚拟式 Konjunktiv II 表非现实或委婉）是谓语的形态，**不是从句的类型**：先按功能定类型（关系从句／状语从句／宾语从句…），语气单独作为一条说明它在这里表达什么。
+- 如果句子里有插入语、同位语、分词结构或省略成分，也请指出；其中自成意群的部分（如同位语、插入语）同样先照抄原文，再按上面的模板附上 ${transLabel} 一行。
 - 保持简洁，用列点呈现，不要写成大段散文。
 
 ## ${terms.vocab}
@@ -6168,6 +6217,8 @@ function populateUiLangSelect() {
 
 function refreshUiLanguage() {
   applyI18n();
+  // Built in JS, so data-i18n can't reach it -- it has to be rebuilt by hand.
+  syncProxyHints();
   updatePagerUI();
   renderTocList();
   populateChapterSelect();
@@ -6305,6 +6356,36 @@ function wireRadioGroup(containerId, onSelect) {
   syncRadioGroupAria(container);
 }
 
+// Show, per provider, the Base URL that routes through the server.py instance
+// serving this page -- but only when there is something to say: the proxy has
+// to be there, it must not already hold that provider's key (then the Base URL
+// is supplied automatically), and the field must not already point at it.
+// Reads the input rather than `settings` so the hint disappears the moment the
+// button fills it in, before anything is saved.
+function syncProxyHints() {
+  document.querySelectorAll('[data-proxy-hint]').forEach(el => {
+    const provider = el.dataset.proxyHint;
+    const info = proxyRelayInfoFor(provider);
+    const input = document.getElementById(provider + '-baseurl-input');
+    const target = info ? info.baseUrl.replace(/\/+$/, '') : '';
+    const already = !!info && input && input.value.trim().replace(/\/+$/, '') === target;
+    el.textContent = '';
+    el.classList.toggle('hidden', !info || already);
+    if (!info || already) return;
+    el.appendChild(document.createTextNode(t('settings.proxyRelayHint', { url: info.baseUrl }) + ' '));
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn';
+    btn.textContent = t('settings.proxyFillBtn');
+    btn.addEventListener('click', () => {
+      input.value = info.baseUrl;
+      syncProxyHints();
+      input.focus();
+    });
+    el.appendChild(btn);
+  });
+}
+
 function syncSettingsFormFromState() {
   document.querySelectorAll('#provider-chips .radio-chip').forEach(chip => {
     chip.classList.toggle('selected', chip.dataset.provider === settings.provider);
@@ -6319,6 +6400,7 @@ function syncSettingsFormFromState() {
   document.getElementById('gemini-key-input').value = settings.providers.gemini.apiKey || '';
   document.getElementById('gemini-baseurl-input').value = settings.providers.gemini.baseUrl || PROVIDER_DEFAULTS.gemini.baseUrl;
   document.getElementById('gemini-model-input').value = settings.providers.gemini.model || PROVIDER_DEFAULTS.gemini.model;
+  syncProxyHints();
 
   document.getElementById('paras-per-page-input').value = settings.parasPerPage || 8;
 
@@ -6423,6 +6505,10 @@ function wireSettingsModal() {
   wireRadioGroup('provider-chips', (chip) => {
     settings.provider = chip.dataset.provider;
     syncProviderFieldsVisibility();
+  });
+  ['anthropic', 'openai', 'gemini'].forEach(p => {
+    const input = document.getElementById(p + '-baseurl-input');
+    if (input) input.addEventListener('input', syncProxyHints);
   });
   wireRadioGroup('lang-rule-chips');
   wireRadioGroup('output-lang-chips', (chip) => {

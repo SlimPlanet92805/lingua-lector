@@ -54,6 +54,57 @@ module.exports = ({ describe, it, assert }) => {
         'prompt must name the placeholder wordings it is banning');
     });
 
+    // Observed on Gemini 3.5 Flash Lite, the weakest model this tool is
+    // routinely pointed at. Two failures in one bullet:
+    //   - 定语从句 + 引导词 *welches* + 修饰主句中的地点名词 *Paraguay*
+    //     the template's own placeholder wording, plus-signs and all, copied
+    //     out as if it were the answer -- and no quote of the clause itself, so
+    //     the reader cannot tell which half of the sentence is meant.
+    //   - an extended participial attribute (*ihnen plötzlich gegebenen*)
+    //     called a relative clause "with the relative pronoun omitted".
+    it('requires the clause itself to be quoted, not just classified', () => {
+      const { get } = loadApp();
+      const prompt = get('buildSystemPrompt')();
+      assert.ok(/逐字照抄/.test(prompt), 'prompt must demand a verbatim quote of the clause');
+      assert.ok(/不要只写引导词/.test(prompt),
+        'prompt must rule out naming only the introducing word');
+    });
+
+    it('bans copying the template placeholders as the answer', () => {
+      const { get } = loadApp();
+      const prompt = get('buildSystemPrompt')();
+      assert.ok(/禁止把上面模板里的示意文字当成答案照抄/.test(prompt),
+        'prompt must forbid echoing the template wording');
+      assert.includes(prompt, '定语从句 + 引导词 + 修饰主句中的成分',
+        'prompt should name the exact bad output shape it is ruling out');
+    });
+
+    // "定语从句" is the English-grammar label (attributive clause) applied
+    // wholesale to every language. German grammar calls it a Relativsatz, and
+    // the label is wrong outright for a free relative clause standing as the
+    // subject. The prompt asks for the analysed language's own terminology and
+    // keeps the syntactic function as a separate statement.
+    it('asks for the analysed language own clause terminology', () => {
+      const { get } = loadApp();
+      const prompt = get('buildSystemPrompt')();
+      assert.includes(prompt, '关系从句', 'prompt must use the relative-clause term');
+      assert.ok(/「定语从句」是英语语法的叫法/.test(prompt),
+        'prompt must say why the blanket English label is rejected');
+      assert.ok(/Relativsatz/.test(prompt), 'prompt should name the German term');
+    });
+
+    it('defines a subordinate clause by its finite verb', () => {
+      const { get } = loadApp();
+      const prompt = get('buildSystemPrompt')();
+      assert.ok(/定式动词/.test(prompt), 'prompt must state the finite-verb criterion');
+      assert.ok(/分词定语/.test(prompt) && /不定式短语/.test(prompt),
+        'prompt must name the structures that are not clauses');
+      // Verb mood is a property of the predicate, not a clause type -- the
+      // model had been answering "Konjunktiv II" where a type was asked for.
+      assert.ok(/Konjunktiv/.test(prompt) && /不是从句的类型/.test(prompt),
+        'prompt must separate verb mood from clause type');
+    });
+
     it('puts the literal headings and label into the prompt', () => {
       const { get } = loadApp();
       const build = get('buildSystemPrompt');

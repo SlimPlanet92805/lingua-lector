@@ -99,6 +99,7 @@
           </datalist>
           <label style="margin-top:14px;" data-i18n="settings.baseUrlOptionalLabel">接口地址（可选，留空用官方地址）</label>
           <input type="text" id="anthropic-baseurl-input" placeholder="https://api.anthropic.com">
+          <div class="field-desc hidden" data-proxy-hint="anthropic"></div>
           <div class="key-warning" data-i18n="settings.anthropicWarning">
             ℹ️ 本工具已通过 <code>anthropic-dangerous-direct-browser-access</code> 请求头启用浏览器直连，
             正常情况下无需额外代理即可使用。但请注意：把 key 直接放进前端代码/浏览器本地存储，意味着任何能访问这台设备浏览器数据的人
@@ -115,6 +116,7 @@
           <input type="password" id="openai-key-input" placeholder="sk-...">
           <label style="margin-top:14px;" data-i18n="settings.baseUrlLabel">接口地址（Base URL）</label>
           <input type="text" id="openai-baseurl-input" placeholder="https://api.openai.com/v1">
+          <div class="field-desc hidden" data-proxy-hint="openai"></div>
           <label style="margin-top:14px;" data-i18n="settings.modelLabel">模型</label>
           <input type="text" id="openai-model-input" list="openai-model-suggestions" placeholder="gpt-5.6-luna">
           <datalist id="openai-model-suggestions">
@@ -137,6 +139,7 @@
           <input type="password" id="gemini-key-input" placeholder="AIza...">
           <label style="margin-top:14px;" data-i18n="settings.baseUrlLabel">接口地址（Base URL）</label>
           <input type="text" id="gemini-baseurl-input" placeholder="https://generativelanguage.googleapis.com/v1beta">
+          <div class="field-desc hidden" data-proxy-hint="gemini"></div>
           <label style="margin-top:14px;" data-i18n="settings.modelLabel">模型</label>
           <input type="text" id="gemini-model-input" list="gemini-model-suggestions" placeholder="gemini-3.5-flash-lite">
           <datalist id="gemini-model-suggestions">

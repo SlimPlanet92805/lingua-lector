@@ -41,7 +41,15 @@ settings and start reading -- the API key field can stay empty.
 
 For a provider you did NOT pass a key for, set its Base URL by hand if you want
 its requests relayed (this solves CORS only, not the "key in the browser"
-question -- your real key still goes in the app's settings and is forwarded):
+question -- your real key still goes in the app's settings and is forwarded).
+
+The one thing people get wrong here: that Base URL must point at THIS SERVER,
+not at the provider. Starting this script and then typing the provider's own
+address (say https://integrate.api.nvidia.com/v1) into the app's Base URL field
+does not route anything through the proxy -- the browser calls NVIDIA directly
+and you get the very CORS error you started the proxy to avoid. The provider's
+address belongs on this script's --openai-base-url flag; the app's Base URL
+field gets the localhost one:
 
   Base URL:  http://localhost:8787/anthropic        (Anthropic)
              http://localhost:8787/openai/v1         (OpenAI-compatible --
@@ -111,6 +119,26 @@ PROXY_PATHS = {
 }
 
 
+def normalize_openai_upstream(url):
+    """Accept an OpenAI-compatible base URL with or without a trailing "/v1".
+
+    Every provider's own docs print the URL *with* it -- NVIDIA says
+    `https://integrate.api.nvidia.com/v1`, DeepSeek `https://api.deepseek.com/v1`
+    -- so that is what people paste. But the app already appends the whole
+    `/v1/chat/completions` path (its Base URL is `http://localhost:PORT/openai/v1`),
+    which produced `.../v1/v1/chat/completions` upstream and a bare 404 with
+    nothing on screen to suggest what was wrong. Measured against NVIDIA:
+    the doubled path is 404, the single one 200.
+
+    Only a trailing `/v1` is stripped -- a host that genuinely serves under
+    some other path keeps it.
+    """
+    url = url.rstrip("/")
+    if url.endswith("/v1"):
+        url = url[: -len("/v1")]
+    return url
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         description="Local CORS proxy + static server for Lingua Lector.",
@@ -125,7 +153,8 @@ def parse_args():
     p.add_argument("--openai-base-url", default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com"),
                    help="Upstream host for the /openai route -- override this to point at "
                         "NVIDIA, Groq, Together, a local Ollama/vLLM server, etc "
-                        "(default: https://api.openai.com)")
+                        "(default: https://api.openai.com). A trailing /v1 is optional: "
+                        "paste the URL exactly as the provider's docs give it.")
     p.add_argument("--gemini-key", default=os.environ.get("GEMINI_API_KEY", ""),
                    help="Gemini API key to inject server-side (optional)")
     p.add_argument("--timeout", type=int, default=int(os.environ.get("LINGUA_LECTOR_PROXY_TIMEOUT", "180")),
@@ -364,7 +393,7 @@ def main():
 
     upstreams = {
         "anthropic": "https://api.anthropic.com",
-        "openai": args.openai_base_url.rstrip("/"),
+        "openai": normalize_openai_upstream(args.openai_base_url),
         "gemini": "https://generativelanguage.googleapis.com",
     }
     server_side_keys = {
@@ -401,6 +430,8 @@ def main():
         print(f"Server-side keys configured for: {', '.join(configured)}")
         print("The app served here configures those providers automatically --")
         print("you shouldn't need to touch Base URL in settings.")
+        if "openai" in configured:
+            print(f"  /openai/v1 forwards to: {upstreams['openai']}/v1")
     else:
         print("No server-side keys configured -- pure CORS relay, browser-supplied keys are forwarded as-is.")
         print("Point a provider's Base URL in Lingua Lector's settings at, e.g.:")

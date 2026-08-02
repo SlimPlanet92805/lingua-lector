@@ -100,6 +100,19 @@ function proxyInfoFor(provider) {
   return info && info.hasServerKey ? info : null;
 }
 
+// The relay case: server.py is serving this page but holds no key for this
+// provider, so nothing is filled in automatically and the reader has to point
+// Base URL at the proxy by hand. Everyone's first instinct is to type the
+// provider's own address there instead, which routes around the proxy entirely
+// and reproduces the CORS failure they started it to fix -- so the settings
+// panel offers the right URL (see syncProxyHints) rather than leaving it to
+// the README.
+function proxyRelayInfoFor(provider) {
+  const info = PROXY_CONFIG && PROXY_CONFIG.providers && PROXY_CONFIG.providers[provider];
+  if (!info || info.hasServerKey || !info.baseUrl) return null;
+  return info;
+}
+
 // A Base URL pointing somewhere other than the provider's own API host is, in
 // practice, a proxy: server.py, the Cloudflare Worker, or a company gateway.
 // Those routinely hold the key themselves, so demanding one in the app would
@@ -1225,6 +1238,8 @@ const I18N = {
     'settings.baseUrlLabel': '接口地址（Base URL）',
     'settings.openaiWarning': 'ℹ️ 部分服务商不允许浏览器直接跨域（CORS）调用其 API——如果遇到"网络请求失败"，通常是这个原因，需要换用允许浏览器直连的服务商，或自建一个允许 CORS 的转发代理。',
     'settings.geminiDesc': '可在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 申请。',
+    'settings.proxyRelayHint': '本机代理 server.py 正在运行。如果服务商拒绝浏览器跨域（CORS）调用，把上面的接口地址改成 {url}，请求就会由它转发（填服务商自己的地址不会经过代理，CORS 错误依旧）。',
+    'settings.proxyFillBtn': '填入代理地址',
     'settings.uiLangLabel': '界面语言',
     'settings.sentenceLangLabel': '原文分句规则（按语言的缩写词表不同）',
     'import.scannedPdf': '这个 PDF 共 {pages} 页，但没有文字层——它是扫描件（纸页的图片）。需要先用 OCR 工具（如 Adobe Acrobat、ABBYY FineReader、ocrmypdf）识别成可选中文字的 PDF，再导入。',
@@ -1358,6 +1373,8 @@ const I18N = {
     'settings.baseUrlLabel': '端點（Base URL）',
     'settings.openaiWarning': 'ℹ️ 部分服務商不允許瀏覽器直接跨網域（CORS）呼叫其 API——如果遇到「網路請求失敗」，通常是這個原因，需要換用允許瀏覽器直連的服務商，或自建一個允許 CORS 的轉發代理。',
     'settings.geminiDesc': '可在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 申請。',
+    'settings.proxyRelayHint': '本機代理 server.py 正在執行。如果服務商拒絕瀏覽器跨域（CORS）呼叫，把上面的端點改成 {url}，請求就會由它轉發（填服務商自己的地址不會經過代理，CORS 錯誤依舊）。',
+    'settings.proxyFillBtn': '填入代理位址',
     'settings.uiLangLabel': '介面語言',
     'settings.sentenceLangLabel': '原文分句規則（依語言的縮寫詞表不同）',
     'import.scannedPdf': '這個 PDF 共 {pages} 頁，但沒有文字層——它是掃描件（紙頁的圖片）。需要先用 OCR 工具（如 Adobe Acrobat、ABBYY FineReader、ocrmypdf）辨識成可選取文字的 PDF，再匯入。',
@@ -1491,6 +1508,8 @@ const I18N = {
     'settings.baseUrlLabel': 'Endpoint (Base URL)',
     'settings.openaiWarning': 'ℹ️ Some providers don\'t allow direct cross-origin (CORS) calls from a browser — that\'s usually why you\'d see a "network request failed" error. Switch to a provider that allows direct browser access, or set up your own CORS-enabled proxy.',
     'settings.geminiDesc': 'Get one at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.proxyRelayHint': 'The local server.py proxy is serving this page. If your provider refuses cross-origin (CORS) calls from a browser, set the Base URL above to {url} and it will relay them (typing the provider\'s own address there bypasses the proxy, and the CORS error stays).',
+    'settings.proxyFillBtn': 'Use the proxy',
     'settings.uiLangLabel': 'Interface language',
     'settings.sentenceLangLabel': 'Sentence-splitting rules (abbreviation list varies by language)',
     'import.scannedPdf': 'This PDF has {pages} pages but no text layer — it is a scan (images of the paper). Run it through OCR first (Adobe Acrobat, ABBYY FineReader, ocrmypdf) so the text becomes selectable, then import it again.',
@@ -1624,6 +1643,8 @@ const I18N = {
     'settings.baseUrlLabel': 'Endpunkt (Base URL)',
     'settings.openaiWarning': 'ℹ️ Manche Anbieter erlauben keine direkten Cross-Origin-Aufrufe (CORS) aus dem Browser — das ist meist der Grund für „Netzwerkanfrage fehlgeschlagen". Wechsle zu einem Anbieter mit direktem Browserzugriff oder richte einen eigenen CORS-fähigen Proxy ein.',
     'settings.geminiDesc': 'Erhältlich im <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.proxyRelayHint': 'Der lokale Proxy server.py liefert diese Seite aus. Wenn Ihr Anbieter Cross-Origin-Aufrufe (CORS) aus dem Browser ablehnt, tragen Sie oben als Endpunkt {url} ein, dann leitet er sie weiter (die Adresse des Anbieters dort umgeht den Proxy, der CORS-Fehler bleibt).',
+    'settings.proxyFillBtn': 'Proxy eintragen',
     'settings.uiLangLabel': 'Oberflächensprache',
     'settings.sentenceLangLabel': 'Satztrennungsregeln (Abkürzungsliste je nach Sprache)',
     'import.scannedPdf': 'Diese PDF hat {pages} Seiten, aber keine Textebene — sie ist ein Scan (Bilder der Buchseiten). Lassen Sie sie zuerst per OCR verarbeiten (Adobe Acrobat, ABBYY FineReader, ocrmypdf), sodass der Text markierbar wird, und importieren Sie sie erneut.',
@@ -1757,6 +1778,8 @@ const I18N = {
     'settings.baseUrlLabel': 'Point d\'accès (Base URL)',
     'settings.openaiWarning': 'ℹ️ Certains fournisseurs n\'autorisent pas les appels cross-origin (CORS) directs depuis un navigateur — c\'est généralement la cause d\'une erreur « échec de la requête réseau ». Passez à un fournisseur autorisant l\'accès direct depuis le navigateur, ou mettez en place votre propre proxy compatible CORS.',
     'settings.geminiDesc': 'À obtenir sur <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.proxyRelayHint': 'Le proxy local server.py sert cette page. Si votre fournisseur refuse les appels cross-origin (CORS) depuis un navigateur, indiquez ci-dessus le point d\'accès {url} et il les relaiera (mettre l\'adresse du fournisseur contourne le proxy, l\'erreur CORS demeure).',
+    'settings.proxyFillBtn': 'Utiliser le proxy',
     'settings.uiLangLabel': 'Langue de l\'interface',
     'settings.sentenceLangLabel': 'Règles de découpage des phrases (liste d\'abréviations selon la langue)',
     'import.scannedPdf': 'Ce PDF compte {pages} pages mais n’a pas de couche de texte : c’est un scan (des images de pages). Passez-le d’abord par un OCR (Adobe Acrobat, ABBYY FineReader, ocrmypdf) pour rendre le texte sélectionnable, puis réimportez-le.',
@@ -1890,6 +1913,8 @@ const I18N = {
     'settings.baseUrlLabel': 'Endpoint (Base URL)',
     'settings.openaiWarning': 'ℹ️ Algunos proveedores no permiten llamadas directas entre orígenes (CORS) desde el navegador — normalmente esa es la causa de un error de "fallo en la solicitud de red". Cambia a un proveedor que permita acceso directo desde el navegador, o configura tu propio proxy compatible con CORS.',
     'settings.geminiDesc': 'Consíguela en <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.proxyRelayHint': 'El proxy local server.py está sirviendo esta página. Si tu proveedor rechaza las llamadas cross-origin (CORS) desde el navegador, pon arriba el endpoint {url} y las retransmitirá (escribir la dirección del proveedor evita el proxy y el error CORS sigue).',
+    'settings.proxyFillBtn': 'Usar el proxy',
     'settings.uiLangLabel': 'Idioma de la interfaz',
     'settings.sentenceLangLabel': 'Reglas de división de frases (la lista de abreviaturas varía según el idioma)',
     'import.scannedPdf': 'Este PDF tiene {pages} páginas pero no capa de texto: es un escaneo (imágenes de las páginas). Pásalo primero por un OCR (Adobe Acrobat, ABBYY FineReader, ocrmypdf) para que el texto sea seleccionable y vuelve a importarlo.',
@@ -2023,6 +2048,8 @@ const I18N = {
     'settings.baseUrlLabel': 'Endpoint (Base URL)',
     'settings.openaiWarning': 'ℹ️ Alcuni provider non consentono chiamate cross-origin (CORS) dirette dal browser — di solito è questa la causa di un errore "richiesta di rete non riuscita". Passa a un provider che consenta l\'accesso diretto dal browser, oppure configura un tuo proxy compatibile con CORS.',
     'settings.geminiDesc': 'Ottienila su <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.proxyRelayHint': 'Il proxy locale server.py sta servendo questa pagina. Se il tuo provider rifiuta le chiamate cross-origin (CORS) dal browser, imposta sopra l\'endpoint {url} e le inoltrerà (inserire l\'indirizzo del provider aggira il proxy e l\'errore CORS resta).',
+    'settings.proxyFillBtn': 'Usa il proxy',
     'settings.uiLangLabel': 'Lingua dell\'interfaccia',
     'settings.sentenceLangLabel': 'Regole di suddivisione delle frasi (elenco abbreviazioni diverso per lingua)',
     'import.scannedPdf': 'Questo PDF ha {pages} pagine ma nessun livello di testo: è una scansione (immagini delle pagine). Passalo prima per un OCR (Adobe Acrobat, ABBYY FineReader, ocrmypdf) così il testo diventa selezionabile, poi reimportalo.',
@@ -2156,6 +2183,8 @@ const I18N = {
     'settings.baseUrlLabel': 'Адрес (Base URL)',
     'settings.openaiWarning': 'ℹ️ Некоторые провайдеры не разрешают прямые межсайтовые (CORS) запросы из браузера — обычно именно из-за этого возникает ошибка «сетевой запрос не удался». Переключитесь на провайдера, разрешающего прямой доступ из браузера, либо настройте собственный прокси с поддержкой CORS.',
     'settings.geminiDesc': 'Получить можно в <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.',
+    'settings.proxyRelayHint': 'Эту страницу отдаёт локальный прокси server.py. Если провайдер отклоняет кросс-доменные (CORS) запросы из браузера, укажите выше адрес {url} — прокси их перешлёт (адрес самого провайдера прокси не задействует, ошибка CORS останется).',
+    'settings.proxyFillBtn': 'Указать прокси',
     'settings.uiLangLabel': 'Язык интерфейса',
     'settings.sentenceLangLabel': 'Правила разбиения на предложения (список сокращений зависит от языка)',
     'import.scannedPdf': 'В этом PDF {pages} страниц, но нет текстового слоя — это скан (изображения страниц). Сначала обработайте его OCR (Adobe Acrobat, ABBYY FineReader, ocrmypdf), чтобы текст стал выделяемым, и импортируйте снова.',
@@ -2289,6 +2318,8 @@ const I18N = {
     'settings.baseUrlLabel': 'エンドポイント（Base URL）',
     'settings.openaiWarning': 'ℹ️ 一部のプロバイダーはブラウザからの直接クロスオリジン（CORS）呼び出しを許可していません。「ネットワークリクエストに失敗しました」というエラーは、たいていこれが原因です。ブラウザからの直接アクセスを許可するプロバイダーに切り替えるか、CORS に対応した独自のプロキシを構築してください。',
     'settings.geminiDesc': '<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> で取得できます。',
+    'settings.proxyRelayHint': 'ローカルの server.py プロキシがこのページを配信しています。プロバイダーがブラウザからのクロスオリジン（CORS）リクエストを拒否する場合は、上のエンドポイントを {url} にすると中継されます（プロバイダー自身のアドレスを入れるとプロキシを通らず、CORS エラーのままです）。',
+    'settings.proxyFillBtn': 'プロキシを入力',
     'settings.uiLangLabel': 'インターフェース言語',
     'settings.sentenceLangLabel': '分文ルール（言語ごとに略語リストが異なります）',
     'import.scannedPdf': 'この PDF は {pages} ページありますが、テキストレイヤーがありません——スキャン画像です。まず OCR（Adobe Acrobat、ABBYY FineReader、ocrmypdf など）でテキストを選択可能にしてから、もう一度読み込んでください。',

@@ -193,6 +193,26 @@ field empty. For a provider you did *not* pass a key for, set its Base URL by ha
 `http://localhost:8787/anthropic`, `http://localhost:8787/openai/v1`, or
 `http://localhost:8787/gemini/v1beta`.
 
+**Pointing it at a non-OpenAI, OpenAI-compatible host** (NVIDIA NIM, Groq, Together,
+DeepSeek, a local Ollama/vLLM…) — the provider's own address goes on the *command line*,
+and the app's Base URL field gets the *localhost* one:
+
+```bash
+python3 server.py --openai-base-url https://integrate.api.nvidia.com/v1 --openai-key nvapi-...
+```
+
+Then pick "OpenAI-compatible" in settings, type the model name (e.g.
+`openai/gpt-oss-120b`), and leave the API key field empty — the Base URL is filled in for
+you. A trailing `/v1` on `--openai-base-url` is optional; paste the URL exactly as the
+provider's docs print it.
+
+> **The two addresses are not interchangeable.** Starting the proxy and *then* typing the
+> provider's own address (`https://integrate.api.nvidia.com/v1`) into the app's Base URL
+> field routes around the proxy entirely: the browser calls the provider directly and you
+> get the very CORS error you started the proxy to avoid. The app now says so in the
+> settings panel when it detects it is being served by `server.py`, with a button that
+> fills in the right URL.
+
 > **Use the app that `server.py` opens** — the page at `http://localhost:8787/`, not the
 > HTML file opened directly. The proxy only answers its own page. A `file://` page reports
 > its origin as `null`, and accepting that would let *any* local HTML file call the proxy

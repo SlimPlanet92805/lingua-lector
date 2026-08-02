@@ -19,6 +19,8 @@ function populateUiLangSelect() {
 
 function refreshUiLanguage() {
   applyI18n();
+  // Built in JS, so data-i18n can't reach it -- it has to be rebuilt by hand.
+  syncProxyHints();
   updatePagerUI();
   renderTocList();
   populateChapterSelect();
@@ -156,6 +158,36 @@ function wireRadioGroup(containerId, onSelect) {
   syncRadioGroupAria(container);
 }
 
+// Show, per provider, the Base URL that routes through the server.py instance
+// serving this page -- but only when there is something to say: the proxy has
+// to be there, it must not already hold that provider's key (then the Base URL
+// is supplied automatically), and the field must not already point at it.
+// Reads the input rather than `settings` so the hint disappears the moment the
+// button fills it in, before anything is saved.
+function syncProxyHints() {
+  document.querySelectorAll('[data-proxy-hint]').forEach(el => {
+    const provider = el.dataset.proxyHint;
+    const info = proxyRelayInfoFor(provider);
+    const input = document.getElementById(provider + '-baseurl-input');
+    const target = info ? info.baseUrl.replace(/\/+$/, '') : '';
+    const already = !!info && input && input.value.trim().replace(/\/+$/, '') === target;
+    el.textContent = '';
+    el.classList.toggle('hidden', !info || already);
+    if (!info || already) return;
+    el.appendChild(document.createTextNode(t('settings.proxyRelayHint', { url: info.baseUrl }) + ' '));
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn';
+    btn.textContent = t('settings.proxyFillBtn');
+    btn.addEventListener('click', () => {
+      input.value = info.baseUrl;
+      syncProxyHints();
+      input.focus();
+    });
+    el.appendChild(btn);
+  });
+}
+
 function syncSettingsFormFromState() {
   document.querySelectorAll('#provider-chips .radio-chip').forEach(chip => {
     chip.classList.toggle('selected', chip.dataset.provider === settings.provider);
@@ -170,6 +202,7 @@ function syncSettingsFormFromState() {
   document.getElementById('gemini-key-input').value = settings.providers.gemini.apiKey || '';
   document.getElementById('gemini-baseurl-input').value = settings.providers.gemini.baseUrl || PROVIDER_DEFAULTS.gemini.baseUrl;
   document.getElementById('gemini-model-input').value = settings.providers.gemini.model || PROVIDER_DEFAULTS.gemini.model;
+  syncProxyHints();
 
   document.getElementById('paras-per-page-input').value = settings.parasPerPage || 8;
 
@@ -274,6 +307,10 @@ function wireSettingsModal() {
   wireRadioGroup('provider-chips', (chip) => {
     settings.provider = chip.dataset.provider;
     syncProviderFieldsVisibility();
+  });
+  ['anthropic', 'openai', 'gemini'].forEach(p => {
+    const input = document.getElementById(p + '-baseurl-input');
+    if (input) input.addEventListener('input', syncProxyHints);
   });
   wireRadioGroup('lang-rule-chips');
   wireRadioGroup('output-lang-chips', (chip) => {

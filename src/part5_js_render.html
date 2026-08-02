@@ -768,6 +768,12 @@ async function onSentenceClick(span, sentenceText) {
   const paraIdx = parseInt(span.dataset.paraIdx, 10);
   const contextParagraph = Number.isFinite(paraIdx) ? PARAGRAPHS[paraIdx] : '';
   renderQuote(sentenceText);
+  // Show the spinner *before* any await. Everything below can take a moment or
+  // bail out, and until this call the panel still displays the "click a
+  // sentence" placeholder -- so a tap that was received looked exactly like a
+  // tap that was never received. That is indistinguishable from the app being
+  // broken, and was reported as exactly that.
+  renderLoading();
 
   // A click within the first few milliseconds of opening a chapter would
   // otherwise read an empty map and pay for an analysis already on disk.
@@ -778,8 +784,6 @@ async function onSentenceClick(span, sentenceText) {
     renderResult(cache.get(cacheKey), sentenceText);
     return;
   }
-
-  renderLoading();
   try {
     const result = await analyzeSentence(sentenceText, contextParagraph);
     cache.set(cacheKey, result);
@@ -1109,8 +1113,8 @@ function buildSystemPrompt() {
 
 ## ${terms.structure}
 ${transLabel}〈这里填这句话完整、通顺、自然的整句翻译〉
-〈这里填后续列点；其中每个从句的列点写成两行，形如〉
-- 〈从句类型 + 引导词 + 修饰/补充主句的哪个成分〉
+〈这里填后续列点；其中每个从句的列点写成两行，第一行必须以照抄的原文开头，形如〉
+- *〈从原文里逐字照抄的这个从句本身〉* —— 〈用完整的话说明它是什么从句、由什么引导、修饰或补充主句里的哪个成分〉
   ${transLabel}〈这个从句部分的译文〉
 
 ## ${terms.vocab}
@@ -1123,11 +1127,19 @@ ${transLabel}〈这里填这句话完整、通顺、自然的整句翻译〉
   让读者不需要追问就能看懂整句话的意思。再说一次：这个标签必须原样写成 ${transLabel}。
 - 然后另起一句话概括整句大意（不是翻译，是更进一步的内容/语气/言外之意概括）。
 - 然后拆解句子的主干：主句的主语、谓语、宾语分别是什么（可直接引用原文词/短语，用 *斜体* 标出）。
-- 如果有从句（定语从句、状语从句、宾语从句等），逐个说明每个从句的类型、引导词、以及它修饰/补充的是主句中的哪个成分。
-  每一个从句都必须**另起一行**、按下面这个模板补上这个从句本身的译文（只说明类型和修饰对象、不给译文，读者仍然不知道这半句在说什么）：
-  \`${transLabel}〈这个从句部分的译文〉\`
-  这个标签同样必须一字不差地写成 ${transLabel}。
-- 如果句子里有插入语、同位语、分词结构或省略成分，也请指出；其中自成意群的部分（如同位语、插入语）同样按上面的模板附上 ${transLabel} 一行。
+- 如果有从句（关系从句、状语从句、宾语从句等），逐个说明，每个从句一个列点，且必须同时满足下面三条：
+  1. **列点必须以这个从句在原文里的连续文字开头，逐字照抄并用 *斜体* 标出。** 只写「关系从句」而不给出原文，读者根本不知道你在讲哪半句；不要改写、不要只写引导词、不要用省略号糊弄（只有从句特别长时才允许把中间部分省略）。
+  2. 然后用**完整的话**说明：它是什么类型的从句、引导词是哪个、修饰或补充的是主句里的哪个成分。**禁止把上面模板里的示意文字当成答案照抄**——像「定语从句 + 引导词 + 修饰主句中的成分」这种用加号把模板项目串起来的写法是错误输出，必须换成这句话里真实的内容。
+  3. 再**另起一行**、按下面这个模板补上这个从句本身的译文（只说明类型和修饰对象、不给译文，读者仍然不知道这半句在说什么）：
+     \`${transLabel}〈这个从句部分的译文〉\`
+     这个标签同样必须一字不差地写成 ${transLabel}。
+- **判定「是不是从句」只有一条标准：这个结构里有没有属于它自己的定式动词（随主语变位的那种动词）。** 没有定式动词的成分一律不是从句，必须用它自己的名称称呼：
+  - 带扩展成分的分词定语／形容词定语（如德语 *die ihnen plötzlich gegebenen freien Staatsformen* 里的 *ihnen plötzlich gegebenen*）叫「分词定语（扩展定语）」，**不是**关系从句，也不要说成「省略了关系代词的定语从句」；
+  - zu + 不定式的结构叫「不定式短语」；介词短语、同位语、独立分词结构同理。
+  拿不准时宁可写「这里没有从句，只有一个扩展定语」，也不要把没有定式动词的成分称作从句。
+- **从句的名称要用被分析语言自己的语法体系里的术语，不要笼统地套用英语语法的说法。** 由关系代词／关系副词引导的从句（德语 Relativsatz：*der/die/das*、*welcher*、*wo*、*was*…；法语 proposition relative；俄语 определительное придаточное 等）一律叫**关系从句**；「定语从句」是英语语法的叫法，而且只描述了它最常见的那一种功能——关系从句也可以不作定语（如德语的自由关系从句 *Wer das sagt, irrt sich.* 整个从句作主语），这时更不能叫定语从句。要说明它在句中的功能就单独说（「作 *Paraguay* 的后置定语」），别把功能塞进名称里。其它类型同理：状语从句要进一步说清是时间／原因／让步／条件等哪一种。
+- 动词的**语气／形态**（如德语第一虚拟式 Konjunktiv I 表转述、第二虚拟式 Konjunktiv II 表非现实或委婉）是谓语的形态，**不是从句的类型**：先按功能定类型（关系从句／状语从句／宾语从句…），语气单独作为一条说明它在这里表达什么。
+- 如果句子里有插入语、同位语、分词结构或省略成分，也请指出；其中自成意群的部分（如同位语、插入语）同样先照抄原文，再按上面的模板附上 ${transLabel} 一行。
 - 保持简洁，用列点呈现，不要写成大段散文。
 
 ## ${terms.vocab}

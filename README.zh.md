@@ -158,6 +158,21 @@ python3 server.py --anthropic-key sk-ant-... --openai-key sk-... --gemini-key AI
 对于没有传 key 的服务商，仍需手动把 Base URL 改成 `http://localhost:8787/anthropic`、
 `http://localhost:8787/openai/v1`、`http://localhost:8787/gemini/v1beta`。
 
+**接入 OpenAI 以外的 OpenAI 兼容服务**（NVIDIA NIM、Groq、Together、DeepSeek、本地
+Ollama/vLLM……）：服务商自己的地址填在*命令行*上，应用里的 Base URL 填的是 *localhost* 那个。
+
+```bash
+python3 server.py --openai-base-url https://integrate.api.nvidia.com/v1 --openai-key nvapi-...
+```
+
+然后在设置里选「OpenAI 兼容」，模型填服务商给的名字（如 `openai/gpt-oss-120b`），API key 一栏
+留空——Base URL 会自动填好。`--openai-base-url` 末尾的 `/v1` 加不加都行，按服务商文档原样粘贴即可。
+
+> **这两个地址不能互换。** 启动了代理，却把服务商自己的地址
+> （`https://integrate.api.nvidia.com/v1`）填进应用的 Base URL，等于完全绕开了代理：浏览器直接
+> 去调服务商，于是又撞上当初想避开的那个 CORS 错误。现在应用发现自己是被 `server.py` 提供的时候，
+> 会在设置面板里直接说明这一点，并给出一个按钮把正确的地址填进去。
+
 > **请使用 `server.py` 自动打开的那个页面**，也就是 `http://localhost:8787/`，而不是直接双击
 > HTML 文件。代理只回应它自己提供的页面：`file://` 打开的页面报告的来源是 `null`，如果接受它，
 > 那么本机上*任何一个* HTML 文件都能调用这个代理、花掉你放在服务端的 key，所以这类请求会被拒绝

@@ -985,10 +985,13 @@
     .reader-inner { padding: 14px 14px 100px; }
     .toolbar { padding: 10px 14px 0; }
     .bottom-pager { left: 14px; right: 14px; }
-    /* Looser leading is the only way to make an inline sentence easier to hit
-       with a fingertip -- the target cannot be padded without disturbing the
-       text flow, so the line it sits on is made taller instead. */
-    p.para { font-size: 17px; line-height: 1.95; }
+    /* NOT looser than the desktop 1.85. Extra leading was added here on the
+       theory that it makes a sentence easier to tap; it does the opposite. An
+       inline span's hit area is the text itself, not the line box, so every
+       extra point of leading only widens the dead gap between one tappable
+       strip and the next. Measured by walking elementFromPoint down the
+       column: at 1.95 roughly half the vertical travel missed the text. */
+    p.para { font-size: 17px; }
 
     /* 44px is the smallest reliably tappable target. */
     .pager-prev, .pager-next, .btn, .panel-close, .modal-close {
