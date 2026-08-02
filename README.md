@@ -1,3 +1,5 @@
+<div align="center">
+
 <p align="right">English · <a href="README.zh.md">简体中文</a></p>
 
 <img src="docs/logo.svg" width="72" alt="Lingua Lector">
@@ -13,6 +15,8 @@ the AI takes it apart for you — with your own API key, no account, no backend.
 ![No backend](https://img.shields.io/badge/No-backend-lightgrey?style=flat-square)
 ![BYOK](https://img.shields.io/badge/BYOK-bring%20your%20own%20key-9cf?style=flat-square)
 ![No install](https://img.shields.io/badge/No-install-yellow?style=flat-square)
+
+</div>
 
 ## What it is
 
