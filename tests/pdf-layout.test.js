@@ -293,4 +293,114 @@ module.exports = ({ describe, it, assert }) => {
       assert.deepEqual(get('detectHeadingIndices')(flat), wanted);
     });
   });
+
+  // A PDF outline is a tree, and several entries routinely resolve to the same
+  // page. Paragraph granularity can't separate them, so they become one
+  // chapter -- but which title that chapter gets is not a detail. The failing
+  // case was "300 Jahre Regiment Hoch- und Deutschmeister.pdf", an anthology
+  // whose outline puts the author on one level and the article title on the
+  // next, both pointing at the article's first page:
+  //     "Bernhard Demel"  ->  "Der Deutsche Orden und das Regiment ..."
+  // Keeping only the outermost entry produced a table of contents that was a
+  // list of author names with no indication of what any of them wrote.
+  describe('PDF outline — merging titles that share a page', () => {
+    const join = (...parts) => loadApp().get('joinOutlineTitles')(parts);
+
+    it('keeps the author and the article title, outermost first', () => {
+      assert.equal(
+        join('Bernhard Demel', 'Der Deutsche Orden und das Regiment'),
+        'Bernhard Demel: Der Deutsche Orden und das Regiment');
+    });
+
+    it('does not repeat a title nested under itself', () => {
+      assert.equal(join('Vorwort', 'Vorwort'), 'Vorwort');
+      // a child that merely restates its parent, or vice versa
+      assert.equal(join('Kapitel 1', 'Kapitel 1 — Anfang'), 'Kapitel 1');
+      assert.equal(join('Die Uniformen', 'Uniformen'), 'Die Uniformen');
+    });
+
+    it('ignores blank entries rather than emitting stray separators', () => {
+      assert.equal(join('', 'Einleitung'), 'Einleitung');
+      assert.equal(join('Einleitung', '', ''), 'Einleitung');
+      assert.equal(join('', ''), '');
+    });
+
+    it('stops at two parts, so a contents page does not become the title', () => {
+      // a dense subsection list all resolving to one page
+      assert.equal(join('A', 'B', 'C', 'D'), 'A: B');
+    });
+
+    // Clipping the merged string, not dropping back to the outer title: in the
+    // anthology the outer title is the author's name, so a "too long" fallback
+    // that keeps only it would reintroduce the bug for every long article.
+    it('clips an over-long merge but keeps both parts visible', () => {
+      const out = join('Author', 'A very long article title ' + 'x'.repeat(200));
+      assert.ok(out.length <= 120, `expected a clipped title, got ${out.length} chars`);
+      assert.ok(out.startsWith('Author: A very long article title'),
+        `author and article must both survive, got ${out}`);
+      assert.ok(out.endsWith('…'), 'clipping should be visible');
+    });
+
+    it('leaves a single entry untouched', () => {
+      assert.equal(join('Chile (Valparaiso) Juli 1886 bis Februar 1889'),
+        'Chile (Valparaiso) Juli 1886 bis Februar 1889');
+    });
+  });
+
+  // For a PDF with no outline, the running header is often the only structural
+  // signal there is. Satow's diary is the case this was built for: no
+  // bookmarks, a single 10.5pt body size for 300 pages (so nothing to find by
+  // font size), dates glued into the prose (so nothing to find by shape) --
+  // but the header band carries the year, 1904 then 1905 then 1906.
+  describe('PDF running header — section boundaries', () => {
+    const marks = (pages) => loadApp().get('runningHeaderMarks')(
+      pages.map((tokens, i) => ({ pageIndex: i, tokens })));
+
+    const TITLE = "Sir Ernest Satow's Peking diary";
+    // 30 pages: 10 of 1904, 10 of 1905, 10 of 1906, each also carrying a folio
+    const diary = [];
+    for (let i = 0; i < 30; i++) {
+      const year = i < 10 ? '1904' : i < 20 ? '1905' : '1906';
+      diary.push([TITLE, year, String(i + 1)]);
+    }
+
+    it('splits where the header changes and titles the section by what changed', () => {
+      const got = marks(diary);
+      assert.deepEqual(got.map(m => m.pageIndex), [10, 20]);
+      assert.deepEqual(got.map(m => m.title), ['1905', '1906']);
+    });
+
+    it('ignores the folio, which changes on every page', () => {
+      // Without this the page number alone would make every page a section.
+      const noYears = diary.map((t, i) => [TITLE, String(i + 1)]);
+      assert.deepEqual(marks(noYears), []);
+    });
+
+    it('ignores a token that appears sporadically rather than in a run', () => {
+      // The regression: a stray "1" on scattered pages used to be treated as
+      // stable everywhere it occurred, so the signature flipped between
+      // {1904} and {1,1904} and every flip read as a boundary. Satow came out
+      // as 69 alternating chapters.
+      const noisy = diary.map((t, i) => (i % 3 === 0 ? [...t, '1'] : t.slice()));
+      const got = marks(noisy);
+      assert.deepEqual(got.map(m => m.title), ['1905', '1906'],
+        'a sporadic token must not create boundaries');
+    });
+
+    it('refuses to chapter a book whose header changes every page or two', () => {
+      // A caption or folio-like token masquerading as a header would shred the
+      // book into fragments. NOTE: this is rejected by the minimum-run rule
+      // (two pages is below it), not by the section-density guard further
+      // down -- that guard is close to unreachable while the minimum run is
+      // the larger of the two, and is kept only as a backstop. Don't read this
+      // case as covering it.
+      const churn = [];
+      for (let i = 0; i < 40; i++) churn.push([TITLE, 'sec' + Math.floor(i / 2)]);
+      assert.deepEqual(marks(churn), []);
+    });
+
+    it('returns nothing when there is no header at all', () => {
+      assert.deepEqual(marks([[], [], []]), []);
+    });
+  });
 };

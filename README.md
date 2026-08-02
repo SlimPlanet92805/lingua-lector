@@ -1,11 +1,11 @@
-<p align="right"><a href="README.en.md">English</a> · 简体中文</p>
+<p align="right">English · <a href="README.zh.md">简体中文</a></p>
 
 <img src="docs/logo.svg" width="72" alt="Lingua Lector">
 
-# Lingua Lector — AI 交互式外语精读阅读器
+# Lingua Lector — AI-Powered Close Reading for Foreign-Language Texts
 
-**单文件 · 纯前端 · BYOK**：把任意外语文本加载进来，逐句点开，AI 拆给你看。
-用你自己的 API key，没有账号，没有后端。
+**Single file, pure frontend, BYOK.** Load any foreign-language text, click a sentence, and
+the AI takes it apart for you — with your own API key, no account, no backend.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue?style=flat-square)](LICENSE)
 ![Single HTML file](https://img.shields.io/badge/Single-HTML%20file-orange?style=flat-square)
@@ -14,159 +14,289 @@
 ![BYOK](https://img.shields.io/badge/BYOK-bring%20your%20own%20key-9cf?style=flat-square)
 ![No install](https://img.shields.io/badge/No-install-yellow?style=flat-square)
 
-## 这是什么
+## What it is
 
-这是一个专门用来读 Elisabeth von Heyking 的德语日记《Tagebücher aus vier Weltteilen》的阅读器——
-不过你也可以拿它读别的东西！
+This is a reader built specifically for Elisabeth von Heyking's German diary *Tagebücher aus
+vier Weltteilen* — but you can absolutely read other things with it!
 
-说正经的：把外语文本（`.txt` / `.docx` / `.pdf` / `.epub` 或直接粘贴）加载进来，正文被切成一句一句
-可点击的单元，点哪句，右边就给出这句话的结构拆解和难词讲解，看完还能接着追问。整个工具是一个 HTML
-文件，双击就能用。那本日记内置在里面当示例，不需要可以删掉。
+Seriously, though: load a text (`.txt` / `.docx` / `.pdf` / `.epub`, or pasted straight in),
+and it comes back split into clickable sentences. Click one and the right-hand panel gives
+you its structure and its vocabulary, with follow-up questions available underneath. The
+whole tool is one HTML file you open by double-clicking it. The diary ships inside it as the
+example book, and can be deleted.
 
-![Lingua Lector 演示](docs/demo.gif)
+![Lingua Lector demo](docs/demo.en.gif)
 
-## 缘起
+## Why this exists
 
-这本书里的句子很长。一个主句能套住 `nachdem` 状语从句、里面再叠两层 `daß` 宾语从句、顺手插进两个
-同位语和两个关系从句，写到近九百个字符都还没并列过一次（见文末「一个例子」——纪录保持者出自编者
-Grete Litzmann 的导言，von Heyking 本人也没客气到哪里去）。1926 年出版的这本日记通篇如此：一位德国
-外交官夫人从瓦尔帕莱索写到加尔各答、开罗、北京、墨西哥，用的是一个世纪前的德语。
+This book is written in long sentences. One main clause can hold a `nachdem` adverbial
+clause, stack two layers of `daß` object clauses inside it, and take on two appositions and
+two relative clauses along the way, running to nearly nine hundred characters without
+coordinating once (see "One example" at the bottom — the record holder comes from the
+introduction by the book's editor, Grete Litzmann, and von Heyking herself is not much
+gentler). The 1926 volume reads like that throughout: a German diplomat's wife writing from
+Valparaíso, Calcutta, Cairo, Peking and Mexico, in century-old German.
 
-于是阅读变成了：读一句、停下、查词典、理从句、发现已经忘了这句话开头在讲什么、回去重读、再往下读
-一句。一页要停十次。
+Which makes reading it go: read a sentence, stop, look a word up, untangle the clauses,
+realise you've forgotten how the sentence started, go back, re-read, move on. Ten stops a page.
 
-这个工具就是为了消掉那十次停顿：点一句话，右边告诉你骨架怎么拆、每个从句在说什么、哪些词值得记，
-然后你接着读。写完发现需要这么读的不止这一本书，它就长成了一个通用精读器，适用于任何拉丁字母文本。
+This tool exists to remove those ten stops: click a sentence, and the panel tells you how
+it's built, what each clause says, and which words are worth remembering. Then you read on.
+It turned out other books needed this too, so it grew into a general close-reading tool for
+any Latin-alphabet text.
 
-## 特性
+## Features
 
-- **逐句解析 + 追问**：整句译文、主干成分，以及**每个从句各自的译文**——不只告诉你「这是个关系从句，
-  修饰 Kaiser」，还告诉你这半句在说什么。请求会带上所在段落作为上下文，但解析范围严格限定在这一句
-- **解析结果留在本地**：按文档缓存，刷新和切换文档都不丢，也不重复消耗用量。对某一句不满意可以单句
-  重新解析，也可以按文档单独清缓存
-- **文档库**：内置全书加上你导入的任意多份文档，各自独立，互不影响缓存和阅读进度。文档正文和缓存存在
-  IndexedDB 里（不可用时退回 `localStorage`），几百页的书也放得下，库里能看到每份占多大
-- **多格式导入**：`.txt` / `.docx` / `.pdf` / `.epub`，全部在浏览器里解析，文件不会上传到任何地方
-- **PDF 位置感知提取**：按文字坐标分行，剔除页眉页码，保留脚注完整性，优先用 PDF 自带书签分章
-- **多 AI 服务商**：Anthropic Claude、OpenAI 兼容接口（含 DeepSeek / Groq / NVIDIA / 本地 Ollama）、
-  Google Gemini，key、模型、接口地址分开保存
-- **三个语言设置互不影响**，可以任意组合：界面用什么语言显示（9 种）、按哪种语言的规则给原文分句
-  （11 种拉丁字母语言 + 通用兜底）、AI 用什么语言写解析（15 种 + 自己填）。读德语原文、界面用中文、
-  解析用英文，是完全正常的组合
-- **内置全书**：《Tagebücher aus vier Weltteilen》12 章，带侧滑目录；不需要就删掉，一键可以恢复
-- **阅读设置**：按段落分页 / 自适应一屏一页 / 不分页；浅色、深色、护眼黄；正文字体与字号可调
+- **Sentence-level analysis with follow-ups**: a translation of the whole sentence, its
+  backbone, and **a translation of every subordinate clause** — not just "relative clause,
+  modifies *Kaiser*", but what that half of the sentence says. The enclosing paragraph goes
+  along as context, while the analysis stays strictly scoped to the sentence you clicked
+- **Answers stay local**: cached per document, surviving refreshes and document switches
+  without paying for the same sentence twice. Re-analyse a single sentence you don't like,
+  or clear one document's cache, without wiping everything
+- **Document library**: the built-in book plus as many imports as you like, each with its own
+  cache and reading position. Text and caches live in IndexedDB (falling back to
+  `localStorage`), so a several-hundred-page book fits, and the library shows what each costs
+- **Multi-format import**: `.txt` / `.docx` / `.pdf` / `.epub`, all parsed in the browser —
+  files never leave your machine
+- **PDF that actually reflows.** A normal PDF reader draws you a photograph of a page: the
+  type is whatever size the typesetter chose in 1926, and your only controls are zoom and
+  pan. This one *rebuilds the text* — lines regrouped from their coordinates, running headers
+  and page numbers stripped, footnotes kept whole, hyphenation rejoined, paragraphs
+  reconstructed across page breaks — and then lays it out fresh. So a scanned-looking old
+  book gets the reading font, the type size, the line width, the theme and the pagination
+  *you* want, and its sentences become clickable like any other text. Chapters come from the
+  PDF's own bookmarks where it has them (nested outlines are merged, so an anthology reads
+  "Author: Title" rather than a bare list of authors); where it has none, a changing running
+  header is used to find the sections
+- **Multiple AI providers**: Anthropic Claude, any OpenAI-compatible endpoint (DeepSeek,
+  Groq, NVIDIA, a local Ollama), and Google Gemini, each with its own key, model and base URL
+- **Three language settings that don't affect each other**, in any combination: what language
+  the interface is in (9), whose sentence-splitting rules apply to the source text
+  (11 Latin-alphabet languages plus a generic fallback), and what language the AI writes its
+  analysis in (15, or type your own). German source, Chinese interface, English analysis is a
+  perfectly ordinary setup
+- **Table of contents**: a slide-out chapter list for whatever you're reading, built from the
+  document's own structure
+- **Built-in book**: all 12 chapters of *Tagebücher aus vier Weltteilen*; delete it if you
+  don't want it, restore it with one click
+- **Reading settings**: paginate by paragraph count, adaptive one-screen pages, or no
+  pagination; light / dark / sepia; adjustable reading font and size
 
-## 快速开始
+## Quick start
 
-1. 下载 `dist/lingua-lector.html`
-2. 双击用浏览器打开（Chrome / Edge / Firefox 均可）
-3. 首次打开会弹出设置面板，选择 AI 服务商并填入 API key
-4. 打开就有内置示例书可读；也可以在「文档」标签页导入文件或粘贴文本
-5. 点正文里任意一句话，右侧出现解析。不满意就按面板上的 ⟳ 重新解析
+### On a computer
 
-## API Key
+1. Download `dist/lingua-lector.html`
+2. Open it in a browser (Chrome / Edge / Firefox)
+3. The settings panel opens on first launch — pick a provider and paste in your API key
+4. The built-in book is there to read; or import a file / paste text under the Document tab
+5. Click any sentence. Press ⟳ on the panel to redo an answer you don't like
 
-- **Anthropic Claude**：[console.anthropic.com](https://console.anthropic.com/settings/keys)
-- **OpenAI**（或 DeepSeek / Groq / NVIDIA / 本地 Ollama，把 Base URL 换成对应地址）：
+### On a phone or tablet
+
+**Open the hosted copy — don't download the file.**
+
+**<https://slimplanet92805.github.io/lingua-lector/>**
+
+That is the same single file, served over `https`. The layout adapts to a narrow screen, the
+pager sits on its own row, and tapping a sentence works exactly as clicking one does. Use
+"Add to Home Screen" if you want it to feel like an app. Your key and library live in that
+browser's storage on the device, the same as on a desktop — nothing is sent anywhere except
+to the AI provider you configured.
+
+A downloaded `.html` will *not* work on a phone, and this is not something the file can fix:
+
+| | what happens | why |
+|---|---|---|
+| **Android** | app opens, tapping a sentence never reaches the AI | browsers refuse network requests from a `file://` page |
+| **iOS** | not even the text appears | iOS cannot open a local `.html` as a web page at all; the Files app shows it in Quick Look, which doesn't run JavaScript |
+
+Both are how the platforms sandbox local files. Serving the file over `https` removes them.
+
+**Prefer to keep everything on your own network?** `server.py --host 0.0.0.0` serves the app
+to your phone from your computer — see [Optional proxy](#optional-proxy) below. That route is
+also the only one where your API key never touches the phone at all.
+
+### When the hosted copy is the wrong choice
+
+The hosted page is served from `https://…github.io`, and browsers deliberately stop a public
+`https` page from reaching services on your own machine or local network. So use the
+downloaded file (plus `server.py` where noted) if any of these is you:
+
+- **You run a local model** — Ollama, LM Studio, llama.cpp, vLLM, LocalAI, anything on
+  `http://localhost:…`. A public page cannot reach it: browsers gate requests from a public
+  site into your private network, and your model server won't be answering those checks. Open
+  the file locally instead, or run `server.py --openai-base-url http://localhost:11434/v1`
+  and point the app at the proxy. **This is the main case.**
+- **You point at a proxy on a plain-`http` address** — a `server.py` on your LAN
+  (`http://192.168.…`) is refused outright as mixed content by an `https` page. A Cloudflare
+  Worker is fine, because it is itself `https`.
+- **You need it fully offline** — the hosted copy has to be fetched before it will run.
+  The downloaded file doesn't (the AI call still needs the network, unless it's a local
+  model, in which case the whole thing runs with no internet at all).
+- **You'd rather GitHub not see you load it**, or you're on a network where `github.io` is
+  blocked. The file is byte-for-byte the same either way — this is only about who observes
+  the page load.
+
+Everyone else — anyone using Anthropic, OpenAI, Gemini or another hosted provider with their
+own key — should just use the hosted copy, especially on a phone.
+
+## API keys
+
+- **Anthropic Claude**: [console.anthropic.com](https://console.anthropic.com/settings/keys)
+- **OpenAI** (or DeepSeek / Groq / NVIDIA / a local Ollama — point the Base URL at it):
   [platform.openai.com](https://platform.openai.com/api-keys)
-- **Google Gemini**：[Google AI Studio](https://aistudio.google.com/apikey)
+- **Google Gemini**: [Google AI Studio](https://aistudio.google.com/apikey)
 
-建议单独为这个工具建一个 key 并设置用量上限。
+Create a dedicated key for this tool and give it a spend limit.
 
-**在 claude.ai 里把这个 HTML 当作 Artifact 打开**（项目最初的用法）：服务商选 Anthropic、key 留空，
-请求会走 claude.ai 的沙盒代理使用你当前的会话。这个 fallback 只对 Anthropic 有效。
+**Opening this HTML file as a claude.ai Artifact** (how the project started): pick Anthropic
+and leave the key blank — requests go through claude.ai's sandbox proxy on your current
+session. That fallback is Anthropic-only.
 
-## Key 存在哪里
+## Where the key lives
 
-只存在你这台设备这个浏览器的 `localStorage` 里，不会发送到 AI 服务商官方接口以外的任何地方。它不是
-HTML 文件的一部分，所以把文件转发给别人或传到 GitHub，对方拿到的是一个空白工具。唯一的风险是这台
-设备本身被别人用——所以别在公用电脑上长期保存 key。
+In your browser's `localStorage`, on this device, and nowhere else; it is never sent anywhere
+except the provider's own endpoint. It isn't part of the HTML file, so forwarding that file
+or pushing it to GitHub hands someone an empty settings panel. The only real exposure is
+someone else using this device — so don't leave a key on a shared computer.
 
-如果不希望 key 留在浏览器里，可以用下面的代理把它挪到服务端，浏览器全程接触不到真实 key。
+If you would rather the key not sit in the browser at all, the proxy below moves it
+server-side, and the browser never touches the real one.
 
-## 可选代理
+## Optional proxy
 
-Anthropic 和 Gemini 都允许浏览器直接跨域调用，正常情况下不需要代理。部分 OpenAI 兼容服务商不允许，
-表现为「网络请求失败」，这时可以用代理绕开，顺便把 key 挪出浏览器。
+Anthropic and Gemini both allow direct cross-origin calls from a browser, so normally no
+proxy is needed. Some OpenAI-compatible providers don't, which shows up as "network request
+failed" — a proxy works around that, and can hold the key for you as well.
 
-**`server.py`**（需要 Python，无第三方依赖）转发 API 请求，同时把 `dist/lingua-lector.html` 用
-`http://` 提供出来并自动打开：
+**`server.py`** (needs Python, no third-party dependencies) relays API requests and also
+serves `dist/lingua-lector.html` over `http://`, opening it for you:
 
 ```bash
-# 只转发，不提升安全性：key 仍由浏览器提供
+# relay only, no security benefit: the key still comes from the browser
 python3 server.py
 
-# key 放在服务端，浏览器不需要真实 key
+# key held server-side; the browser never sees a real one
 python3 server.py --anthropic-key sk-ant-... --openai-key sk-... --gemini-key AIza...
 ```
 
-然后在设置里把对应服务商的 Base URL 改成 `http://localhost:8787/anthropic`、
-`http://localhost:8787/openai/v1`、`http://localhost:8787/gemini/v1beta`。
-其余参数见 `python3 server.py --help`。
+If you passed a key flag, there is nothing to set up in the app: the page served at
+`http://localhost:8787/` is told which providers the proxy holds a key for and fills in
+their Base URL itself, so just pick that provider and start reading — leave the API key
+field empty. For a provider you did *not* pass a key for, set its Base URL by hand to
+`http://localhost:8787/anthropic`, `http://localhost:8787/openai/v1`, or
+`http://localhost:8787/gemini/v1beta`.
 
-**`cloudflare-worker.js`** 功能相同，跑在 Cloudflare 免费额度上，不需要本地装东西：在
-[dash.cloudflare.com](https://dash.cloudflare.com) 新建 Worker，粘贴本仓库
-`cloudflare-worker.js` 的全部内容并 Deploy，需要的话在 Settings → Variables 里以 secret 形式添加
-`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`，然后把 Base URL 填成
-`https://你的worker地址/anthropic`。
+> **Use the app that `server.py` opens** — the page at `http://localhost:8787/`, not the
+> HTML file opened directly. The proxy only answers its own page. A `file://` page reports
+> its origin as `null`, and accepting that would let *any* local HTML file call the proxy
+> and spend a server-side key, so those requests are refused with a message saying so.
+> `--allow-origin` overrides this if you have a reason to.
 
-两种代理都只做转发，不记录内容；`server.py` 只监听本机回环地址。
+Remaining
+options are in `python3 server.py --help`.
 
-## 支持范围
+### Serving it to a phone on your own network
 
-| 格式 | 实现 | 说明 |
+By default `server.py` listens on `127.0.0.1`, so only this machine can reach it. `--host`
+opens that up:
+
+```bash
+python3 server.py --host 0.0.0.0 --anthropic-key sk-ant-...
+```
+
+It prints the address to use, e.g. `http://192.168.1.12:8787/`. Open that on the phone — the
+app is served, the LAN origin is added to the allow-list automatically, and the Base URLs it
+fills in point back at your computer rather than at `localhost` (which on a phone would mean
+the phone itself).
+
+This is the best mobile setup if you have a computer to hand: nothing is published, it works
+without internet beyond the AI call itself, and with a `--...-key` the phone never holds your
+API key at all.
+
+> **Read this before using `--host`.** It exposes the proxy to everyone on the network. With
+> a server-side key configured, anyone who can reach your machine can spend it — there is no
+> authentication. Fine on a home network you control; **don't do it on café, hotel, airport,
+> or campus Wi-Fi.** Stop the server when you're done. On the public hosted copy this
+> question doesn't arise, because there is no proxy and no key but your own browser's.
+
+**`cloudflare-worker.js`** does the same on Cloudflare's free tier with nothing installed
+locally: create a Worker at [dash.cloudflare.com](https://dash.cloudflare.com), paste in the
+full contents of this repo's `cloudflare-worker.js`, deploy, optionally add
+`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` as secrets under Settings →
+Variables, and set the Base URL to `https://your-worker-url/anthropic`.
+
+A Worker has no way to know where you keep your copy of the app, so you must also add a
+plain `ALLOWED_ORIGINS` variable naming the page allowed to call it — the literal word
+`null` if you open the HTML file from disk, or an origin such as `https://you.github.io` if
+you host it. Until that is set the Worker refuses everything, which is deliberate: a Worker
+holding a key secret with no origin check is a key anyone who finds the URL can spend.
+
+Both are plain relays that don't log or inspect content; `server.py` binds to localhost only.
+
+## Coverage
+
+| Format | Implementation | Notes |
 |---|---|---|
-| `.txt` | 浏览器原生 | 按空行分段 |
-| `.docx` | [mammoth.js](https://github.com/mwilliamson/mammoth.js) | 提取纯文本，不保留排版 |
-| `.pdf` | [pdf.js](https://mozilla.github.io/pdf.js/) | 坐标分行、剔除页眉页码、保留脚注；优先用自带书签分章；仅文字版 |
-| `.epub` | [epub.js](https://github.com/futurepress/epub.js) + [JSZip](https://stuk.github.io/jszip/) | 用 epub 自带目录分章 |
+| `.txt` | native `File.text()` | paragraphs split on blank lines |
+| `.docx` | [mammoth.js](https://github.com/mwilliamson/mammoth.js) | plain text, no formatting preserved |
+| `.pdf` | [pdf.js](https://mozilla.github.io/pdf.js/) | lines grouped by coordinates, headers/page numbers stripped, footnotes preserved, own bookmarks used for chapters; text-layer PDFs only |
+| `.epub` | [epub.js](https://github.com/futurepress/epub.js) + [JSZip](https://stuk.github.io/jszip/) | chapters follow the epub's table of contents |
 
-分句规则覆盖德语、英语、法语、西班牙语、意大利语、葡萄牙语、荷兰语、拉丁语、捷克语、波兰语、
-土耳其语，外加一个通用拉丁字母兜底规则。CJK、西里尔字母等非拉丁字母语言的分句逻辑完全不同，
-塞进现有算法效果会很差，这是明确的功能边界。AI 输出语言和界面语言不受此限制。
+Sentence splitting is verified for German, English, French, Spanish, Italian, Portuguese,
+Dutch, Latin, Czech, Polish and Turkish, plus a generic Latin-alphabet fallback. CJK,
+Cyrillic and other non-Latin scripts need fundamentally different segmentation, and forcing
+them through this algorithm would work badly — that's a known boundary. AI output language
+and UI language are not limited this way.
 
-## 已知限制
+## Known limitations
 
-- 依赖通过 CDN 引入，离线不可用（首次导入 docx/pdf/epub 和每次解析都需要联网）
-- 扫描版 PDF 需要 OCR，本工具不含 OCR
-- 自身没有书签的 PDF 会整本作为一章导入。勾选「尝试识别标题并拆分为多章节」可以试着切分，那是基于
-  段落形状的启发式：排版规整的书能切对，索引和注释密集的书切不准，结果要自己看一眼
-- 分句是规则算法，原文噪声大（OCR 残留）时效果打折
-- 部分 AI 服务商不允许浏览器直接跨域调用，见上文
+- Dependencies load from a CDN, so it doesn't work offline (first-time docx/pdf/epub import
+  and every analysis call need the network)
+- Scanned PDFs need OCR, which this tool doesn't include
+- A PDF with no bookmarks imports as a single chapter. "Try to detect headings and split into
+  chapters" will attempt it, using a paragraph-shape heuristic: right on cleanly typeset
+  books, unreliable on index-heavy ones, so check the result
+- Sentence splitting is rule-based and does worse on messy source text (OCR noise)
+- Some AI providers don't allow direct cross-origin calls from a browser — see above
 
-## 开发
+## Development
 
 ```
 lingua-lector/
-├── dist/lingua-lector.html   # 唯一需要的文件
-├── examples/                 # 内置示例书原始数据（公版），每章一个 JSON
-├── src/part1..6              # 按逻辑拆分的源码：CSS / body / 核心 / 导入 / 渲染 / 初始化
-├── build.py                  # 拼接 src，生成 dist/lingua-lector.html
-├── server.py                 # 可选本地代理
-└── cloudflare-worker.js      # 可选 Cloudflare 代理
+├── dist/lingua-lector.html   # the only file you actually need
+├── examples/                 # source data for the built-in book (public domain), one JSON per chapter
+├── src/part1..6              # source split by concern: CSS / body / core / import / render / init
+├── build.py                  # concatenates src into dist/lingua-lector.html
+├── server.py                 # optional local proxy
+└── cloudflare-worker.js      # optional Cloudflare proxy
 ```
 
 ```bash
 python3 build.py && node tests/run.js
 ```
 
-测试只需要 Node，不装任何 npm 包，跑的是**构建产物**，所以 `build.py` 的拼接与占位符注入也在覆盖
-范围内——先 build 再测。只跑某一类：`node tests/run.js i18n`（按文件名匹配）。
+The suite needs nothing but Node — no `npm install`, because a test suite you have to install
+first is one that stops getting run. It runs against the **built artifact**, so `build.py`'s
+concatenation and placeholder injection are covered too: build first, then test. Run a subset
+by filename: `node tests/run.js i18n`.
 
-| 文件 | 内容 |
+| File | Covers |
 | --- | --- |
-| `build-integrity.test.js` | 占位符已替换、标签平衡、内联 JS 语法、`getElementById` 无悬空引用 |
-| `i18n.test.js` | 九种语言 key 完整性、`{占位符}` 一致性、页码组件渲染文本、三处语言列表排序一致、提示语提到的按钮真实存在 |
-| `library.test.js` | 文档库生命周期、存储后端选择与迁移、解析缓存的按文档隔离 |
-| `sentences.test.js` | 分句多语言边界用例 + 全书语料统计护栏（碎片率、超长句率、字符不丢失） |
-| `properties.test.js` | 固定种子生成 2000 条病态输入，逐条断言不变量；外加英文真实语料回归 |
-| `pdf-layout.test.js` | PDF 行合并、段落切分、标题启发式（用内置全书验证召回，用真实误判样本验证排除） |
-| `prompt.test.js` | 系统提示词字面量、译文标签兜底改写、章节切分容错、供应商默认模型 |
-| `a11y.test.js` | 语种标注、键盘可达性、live region 与弹窗语义、图标按钮可访问名称、主题对比度 |
+| `build-integrity.test.js` | placeholder substitution, tag balance, inline JS syntax, dangling `getElementById` references |
+| `i18n.test.js` | key coverage across nine languages, `{placeholder}` consistency, pager rendering, one shared order for all three language lists, buttons named in instructions actually existing |
+| `library.test.js` | document-library lifecycle, storage-backend selection and migration, per-document cache isolation |
+| `sentences.test.js` | multi-language splitting edge cases plus statistical guardrails over the whole book |
+| `properties.test.js` | 2000 seeded pathological inputs, invariants asserted per case, plus an English corpus regression |
+| `pdf-layout.test.js` | PDF line assembly, paragraph splitting, heading detection (recall checked against the built-in book, precision against real false positives) |
+| `prompt.test.js` | system-prompt literals, translation-label rewriting, chapter-split fallbacks, provider defaults |
+| `a11y.test.js` | language tagging, keyboard reachability, live regions and dialog semantics, icon-button names, theme contrast |
 
-## 一个例子
+## One example
 
-书中最长的单句之一，出自编者所写的导言：
+One of the longest single sentences in the book, from the editor's introduction:
 
 > Nach einjährigem Urlaub, den das Paar in völliger Stille in Florenz verlebt, nimmt er
 > schweren Herzens eine Anstellung als stellvertretender Konsul in New York an, nachdem
@@ -180,22 +310,24 @@ python3 build.py && node tests/run.js
 > angesichts des höfischen Einflusses seiner Gegner ein großes Maß von Selbständigkeit
 > erfordert hätte!
 
-一个主句，一个 `nachdem` 状语从句，两层 `daß` 宾语从句，两处同位语，两个关系从句，全靠层层修饰撑起
-近九百字符。工具拆给你看的就是这个：
+One main clause, a `nachdem` adverbial clause, two layers of `daß` object clauses, two
+appositions, two relative clauses, and nearly nine hundred characters held up entirely by
+subordination. Taking that apart is what the tool does:
 
-![最长句的解析结果](docs/longest-sentence-analysis.png)
+![the longest sentence, analysed](docs/longest-sentence-analysis.png)
 
-## 致谢
+## Acknowledgments
 
-- 内置示例文本为 Elisabeth von Heyking《Tagebücher aus vier Weltteilen》全书（1926，Grete Litzmann 编），
-  已进入公有领域
-- 文件解析依赖 [mammoth.js](https://github.com/mwilliamson/mammoth.js)（BSD-2-Clause）、
-  [pdf.js](https://github.com/mozilla/pdf.js)（Apache-2.0）、
-  [epub.js](https://github.com/futurepress/epub.js)（BSD-2-Clause）、
-  [JSZip](https://github.com/Stuk/jszip)（MIT/GPLv3 双重授权）
-- 项目主要由 Claude（Anthropic）辅助开发
+- The built-in example text is the complete *Tagebücher aus vier Weltteilen* by Elisabeth
+  von Heyking (1926 edition, ed. Grete Litzmann), now in the public domain
+- File parsing relies on [mammoth.js](https://github.com/mwilliamson/mammoth.js)
+  (BSD-2-Clause), [pdf.js](https://github.com/mozilla/pdf.js) (Apache-2.0),
+  [epub.js](https://github.com/futurepress/epub.js) (BSD-2-Clause), and
+  [JSZip](https://github.com/Stuk/jszip) (dual MIT/GPLv3)
+- Developed mainly with Claude (Anthropic)
 
 ## License
 
-AGPL-3.0，见 [LICENSE](LICENSE)。选择 AGPL 是希望改进能回流：如果有人修改后把服务部署给公众使用，
-AGPL-3.0 要求同时公开修改版的源码。个人使用、二次开发、自建部署都不受影响。
+AGPL-3.0, see [LICENSE](LICENSE). AGPL rather than MIT so improvements flow back: anyone who
+modifies this and runs it as a public service has to publish their modified source. Personal
+use, forking, and self-hosting are unaffected.

@@ -154,11 +154,103 @@ async function extractPdfLines(page) {
   // sitting in the top or bottom ~9% of the page
   const topBand = pageHeight * 0.91;
   const bottomBand = pageHeight * 0.09;
-  return lines.filter(l => {
-    const nearEdge = l.y > topBand || l.y < bottomBand;
+  const inEdgeBand = (l) => l.y > topBand || l.y < bottomBand;
+  const kept = lines.filter(l => {
     const looksLikeFolio = l.text.length <= 12 && !/[a-zà-öø-ÿ]/.test(l.text);
-    return !(nearEdge && looksLikeFolio);
+    return !(inEdgeBand(l) && looksLikeFolio);
   });
+  // Everything sitting in the running-header / folio bands, whether or not the
+  // filter above dropped it. Chaptering reads this: a running header whose
+  // text changes marks a section boundary (see runningHeaderMarks). Attached
+  // as a property rather than returned separately so the signature stays "an
+  // array of lines" -- JSON.stringify ignores non-index properties, which is
+  // what the layout tests compare on.
+  // Deliberately a wider band than the folio filter above. Satow's diary sets
+  // its year line at 91.0% of page height while that threshold is 91.02%, so
+  // the one token carrying the book's structure missed the band by a fraction
+  // of a point. Being generous here is safe because runningHeaderMarks only
+  // trusts tokens that repeat across consecutive pages: body text swept up by
+  // the wider band differs page to page and drops out on its own.
+  const headerBandTop = pageHeight * 0.86;
+  const headerBandBottom = pageHeight * 0.14;
+  kept.edgeLines = lines
+    .filter(l => l.y > headerBandTop || l.y < headerBandBottom)
+    .map(l => l.text);
+  return kept;
+}
+
+// A running header that changes its text marks a section boundary.
+//
+// This is the only structural signal some books have. Satow's diary carries
+// the year (1904/1905/1906) in the header band; the Deutschmeister anthology
+// puts "Author: Title" there, one per article. Neither has a PDF outline, and
+// -- measured across the whole book, not a sample -- both set their body text
+// in a single size throughout, so there is no font-size jump and no centred
+// heading to find. Every larger run in Satow turned out to be front or back
+// matter (title page, photo captions, bibliography), so splitting on size
+// would manufacture junk chapters rather than find real ones.
+//
+// Folios have to be ignored or every page becomes its own section. A page
+// number changes on every page; a year survives for hundreds. Requiring a
+// token to hold for at least this many consecutive pages separates the two.
+const MIN_HEADER_RUN = 5;
+
+// Sections shorter than this are noise, not structure -- if the "header"
+// changes every couple of pages it is a folio or a caption, not a section
+// title, and acting on it shreds the book.
+const MIN_PAGES_PER_HEADER_SECTION = 4;
+
+function runningHeaderMarks(pageHeaders) {
+  // pageHeaders: [{ pageIndex, tokens: [string] }] in page order
+  //
+  // Stability has to be decided per page, not per token. Marking a token
+  // "stable everywhere" because it managed one long run somewhere lets a
+  // stray "1" that appears on scattered pages join the signature on each of
+  // them, and the signature then flips between {1904} and {1, 1904} back and
+  // forth -- which reads as a section boundary every time it flips. Satow
+  // came out as 69 alternating "1"/"1904" chapters that way.
+  const stableAt = pageHeaders.map(() => new Set());
+  const positionsOf = new Map();
+  pageHeaders.forEach(({ tokens }, i) => {
+    for (const t of new Set(tokens)) {
+      if (!positionsOf.has(t)) positionsOf.set(t, []);
+      positionsOf.get(t).push(i);
+    }
+  });
+  for (const [token, positions] of positionsOf) {
+    let runStart = 0;
+    for (let k = 1; k <= positions.length; k++) {
+      const broken = k === positions.length || positions[k] !== positions[k - 1] + 1;
+      if (!broken) continue;
+      if (k - runStart >= MIN_HEADER_RUN) {
+        for (let j = runStart; j < k; j++) stableAt[positions[j]].add(token);
+      }
+      runStart = k;
+    }
+  }
+
+  const marks = [];
+  let prevSignature = null;
+  pageHeaders.forEach(({ pageIndex, tokens }, i) => {
+    const sig = [...stableAt[i]].sort();
+    if (!sig.length) return;
+    const key = sig.join('|');
+    if (prevSignature === null) { prevSignature = key; return; }
+    if (key === prevSignature) return;
+    // Title the section by what actually changed -- the constant part of the
+    // header (a book title repeated on every page) says nothing about which
+    // section this is.
+    const prevSet = new Set(prevSignature.split('|'));
+    const changed = sig.filter(t => !prevSet.has(t));
+    marks.push({ pageIndex, title: joinOutlineTitles(changed.length ? changed : sig) });
+    prevSignature = key;
+  });
+
+  // A header that changes every page or two is not chaptering the book.
+  const lastPage = pageHeaders.length ? pageHeaders[pageHeaders.length - 1].pageIndex : 0;
+  const span = Math.max(1, lastPage - (marks.length ? marks[0].pageIndex : 0));
+  if (marks.length && span / marks.length < MIN_PAGES_PER_HEADER_SECTION) return [];
+  return marks;
 }
 
 // Shared core: walks every page once, producing paragraphs AND which
@@ -181,8 +273,14 @@ async function extractPdfParagraphsWithPages(pdf) {
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const lines = await extractPdfLines(page);
-    if (lines.length) pageLines.push({ page: p, lines });
+    if (lines.length) pageLines.push({ page: p, lines, edgeLines: lines.edgeLines || [] });
   }
+  // Kept alongside the paragraphs so a caller with no PDF outline can still
+  // find sections (runningHeaderMarks).
+  const pageHeaders = pageLines.map(({ page, edgeLines }) => ({
+    pageIndex: page - 1, // 0-based, matching pdf.js's own convention
+    tokens: edgeLines,
+  }));
 
   // Body-margin mode, computed separately for odd and even pages. Properly
   // bound books commonly mirror their margins page to page to leave room for
@@ -289,7 +387,7 @@ async function extractPdfParagraphsWithPages(pdf) {
     }
   }
   flush();
-  return { paragraphs, pageOfParagraph };
+  return { paragraphs, pageOfParagraph, pageHeaders };
 }
 
 async function extractPdfText(arrayBuffer) {
@@ -330,6 +428,34 @@ async function flattenPdfOutline(pdf, items, out) {
 // author's own actual chapter structure rather than a guess. Returns null
 // (letting the caller fall back to the flat-text heuristic path) when no
 // usable outline exists.
+// Builds one chapter title out of the outline entries that share a page.
+// Kept deliberately conservative: a page carrying many outline entries is a
+// contents page or a dense subsection list, and gluing all of them together
+// would produce a title longer than the paragraph it labels.
+const OUTLINE_TITLE_MAX_PARTS = 2;
+const OUTLINE_TITLE_MAX_CHARS = 120;
+
+function joinOutlineTitles(parts) {
+  const seen = [];
+  for (const raw of parts) {
+    const title = (raw || '').trim();
+    if (!title) continue;
+    // "Vorwort" nested under "Vorwort", or a child repeating its parent
+    // verbatim, should not become "Vorwort: Vorwort"
+    if (seen.some(t => t === title || t.includes(title) || title.includes(t))) continue;
+    seen.push(title);
+    if (seen.length >= OUTLINE_TITLE_MAX_PARTS) break;
+  }
+  const joined = seen.join(': ');
+  // Truncate the merged title rather than falling back to the outer one
+  // alone: for the anthology case the outer entry is the author name, so
+  // dropping the rest would reinstate the very problem this merge fixes. A
+  // clipped "Author: Article tit…" still says which article it is.
+  return joined.length > OUTLINE_TITLE_MAX_CHARS
+    ? joined.slice(0, OUTLINE_TITLE_MAX_CHARS - 1).trimEnd() + '…'
+    : joined;
+}
+
 async function extractPdfChapters(arrayBuffer) {
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   pdfLastPageCount = pdf.numPages;
@@ -351,18 +477,44 @@ async function extractPdfChapters(arrayBuffer) {
   const usable = flatOutline
     .filter(o => Number.isInteger(o.pageIndex))
     .sort((a, b) => a.pageIndex - b.pageIndex);
-  // collapse entries that resolve to the same page (nested subsections
-  // landing on their parent's first page) down to just the first/outer one --
-  // paragraph-level granularity can't place them any more precisely anyway
+  // Entries resolving to the same page have to become one chapter, because
+  // paragraph-level granularity can't place them any more precisely. Their
+  // titles are *merged* rather than all-but-the-first discarded: in a nested
+  // outline the outer entry is frequently a label for the inner one rather
+  // than a section of its own, and dropping the inner one throws away the
+  // part that actually identifies the chapter. An anthology whose outline is
+  //     "Bernhard Demel"  ->  "Der Deutsche Orden und das Regiment ..."
+  // (author on one level, article title on the next, both on page 12) has to
+  // come out as "Bernhard Demel: Der Deutsche Orden ...", not as the bare
+  // author name. flattenPdfOutline walks depth-first and the sort below is
+  // stable, so entries arrive outermost-first and read in that order.
   const marks = [];
   for (const o of usable) {
-    if (marks.length && marks[marks.length - 1].pageIndex === o.pageIndex) continue;
-    marks.push(o);
+    const prev = marks.length ? marks[marks.length - 1] : null;
+    if (prev && prev.pageIndex === o.pageIndex) {
+      prev.titleParts.push(o.title);
+      continue;
+    }
+    marks.push({ pageIndex: o.pageIndex, titleParts: [o.title] });
   }
-  if (marks.length < 2) return null; // not enough structure to be worth using
+  marks.forEach(m => { m.title = joinOutlineTitles(m.titleParts); });
 
-  const { paragraphs, pageOfParagraph } = await extractPdfParagraphsWithPages(pdf);
+  const { paragraphs, pageOfParagraph, pageHeaders } = await extractPdfParagraphsWithPages(pdf);
   if (!paragraphs.length) throw new Error(t('import.noText'));
+
+  // No usable outline: fall back to the running header. Books without
+  // bookmarks are exactly the ones the shape-based heading heuristic does
+  // worst on, and a header that changes text is a far more reliable boundary
+  // than guessing from paragraph shape.
+  if (marks.length < 2) {
+    const headerMarks = runningHeaderMarks(pageHeaders || []);
+    if (headerMarks.length < 1) return null; // nothing to go on; caller falls back
+    marks.length = 0;
+    marks.push(...headerMarks);
+    // The header only tells us where sections *change*, so the run before the
+    // first change is a section too and would otherwise be dropped.
+    if (marks[0].pageIndex > 0) marks.unshift({ pageIndex: 0, title: '' });
+  }
 
   const chapters = [];
   for (let m = 0; m < marks.length; m++) {

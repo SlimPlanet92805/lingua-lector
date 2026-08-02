@@ -110,6 +110,42 @@ module.exports = ({ describe, it, assert }) => {
       assert.includes(html, 'aria-labelledby="settings-title"', 'dialog has an accessible name');
     });
 
+    it('exposes the analysis tabs as a real tablist', () => {
+      const { html } = loadApp();
+      assert.includes(html, 'role="tablist"', 'tab strip is a tablist');
+      assert.includes(html, 'role="tab"', 'tabs carry the tab role');
+      assert.includes(html, 'role="tabpanel"', 'panels carry the tabpanel role');
+      assert.includes(html, 'aria-controls="tabpanel-grammar"', 'tab points at its panel');
+      assert.includes(html, 'aria-labelledby="tab-grammar"', 'panel points back at its tab');
+      assert.includes(html, "aria-selected", 'selection state is exposed');
+      assert.includes(html, "e.key === 'ArrowRight'", 'arrow keys move between tabs');
+      assert.includes(html, '.tab-btn:focus-visible', 'focused tab is visibly indicated');
+    });
+
+    it('exposes the settings chip rows as radio groups', () => {
+      const { html, get } = loadApp();
+      assert.includes(html, "setAttribute('role', 'radiogroup')", 'chip rows are radio groups');
+      assert.includes(html, "setAttribute('role', 'radio')", 'chips carry the radio role');
+      assert.includes(html, '.radio-chip:focus-visible', 'focused chip is visibly indicated');
+      // The five rows must go through the shared helper -- that is what gives
+      // them roles and key handling at all. A row wired by hand would look
+      // fine on screen and be silently unreachable by keyboard.
+      const wired = [...html.matchAll(/wireRadioGroup\('([a-z-]+)'/g)].map(m => m[1]);
+      for (const id of ['provider-chips', 'lang-rule-chips', 'output-lang-chips',
+                        'pagination-mode-chips', 'theme-chips']) {
+        assert.ok(wired.includes(id), `${id} must be wired through wireRadioGroup, got ${wired}`);
+      }
+      assert.ok(typeof get('syncRadioGroupAria') === 'function', 'ARIA state is derived in one place');
+    });
+
+    it('gives every chip row a roving tabindex rather than one stop per chip', () => {
+      const { html } = loadApp();
+      // 37 chips each being a tab stop would mean ~37 presses to cross the
+      // settings dialog; the group must present exactly one.
+      assert.includes(html, 'chip.tabIndex = (on || (!selected && chip === chips[0])) ? 0 : -1',
+        'exactly one chip per group is a tab stop');
+    });
+
     it('traps focus inside the settings dialog and restores it on close', () => {
       const { html } = loadApp();
       assert.includes(html, 'function wireSettingsFocusTrap', 'focus trap exists');

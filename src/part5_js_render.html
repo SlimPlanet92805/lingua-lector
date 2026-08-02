@@ -354,6 +354,10 @@ function renderPage(pageIndex) {
 let resizeRerenderTimer = null;
 function wireResizeRerender() {
   window.addEventListener('resize', () => {
+    // Title refitting is deliberately NOT done here. A resize fires a burst of
+    // events, and measuring inside one reads a width the layout hasn't caught
+    // up with yet -- which shrank titles to the floor and left them there.
+    // observeTitleFit()'s ResizeObserver reports a settled width instead.
     if (settings.paginationMode !== 'fit-height') return;
     clearTimeout(resizeRerenderTimer);
     resizeRerenderTimer = setTimeout(() => {
@@ -401,9 +405,7 @@ async function saveProgress() {
       await window.storage.set(key, payload);
     }
   } catch (e) { /* artifact storage may be unavailable outside claude.ai */ }
-  try {
-    localStorage.setItem(key, payload);
-  } catch (e) { /* ignore */ }
+  safeStorageWrite(() => localStorage.setItem(key, payload));
 }
 
 async function loadProgress() {
@@ -470,6 +472,89 @@ function switchChapter(index) {
   hideToc();
 }
 
+// The three header fields are <input>s, so their text cannot wrap: a long
+// "Author · Title" is simply cut off at the right edge, which on a phone is
+// most of it. Shrinking the type per breakpoint doesn't fix this -- a title
+// long enough will overflow any fixed size -- so instead the size is reduced
+// until it actually fits, with a floor so it never becomes unreadable.
+// scrollWidth is not usable here: on an <input> the engines clamp it to
+// clientWidth when the field isn't focused, so an overflowing title reports as
+// fitting and the size is never reduced. Measuring the string in a mirror
+// span, with the same typography, is what actually answers "how wide is this
+// text at this size".
+let titleProbe = null;
+function titleTextWidth(el, sizePx) {
+  if (!titleProbe) {
+    titleProbe = document.createElement('span');
+    titleProbe.setAttribute('aria-hidden', 'true');
+    titleProbe.style.cssText =
+      'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:pre;';
+    document.body.appendChild(titleProbe);
+  }
+  const cs = getComputedStyle(el);
+  const baseSize = parseFloat(cs.fontSize) || sizePx;
+  // letter-spacing is reported in px against the *current* size, so it has to
+  // be rescaled or a tracked-out title (the book line is 0.12em) mismeasures.
+  const spacing = parseFloat(cs.letterSpacing);
+  titleProbe.style.fontFamily = cs.fontFamily;
+  titleProbe.style.fontWeight = cs.fontWeight;
+  titleProbe.style.fontStyle = cs.fontStyle;
+  titleProbe.style.textTransform = cs.textTransform;
+  titleProbe.style.fontSize = sizePx + 'px';
+  titleProbe.style.letterSpacing =
+    Number.isFinite(spacing) ? (spacing * sizePx / baseSize) + 'px' : 'normal';
+  titleProbe.textContent = el.value || '';
+  return titleProbe.getBoundingClientRect().width;
+}
+
+function fitTitleField(el) {
+  if (!el || el.classList.contains('hidden')) return;
+  // Clearing first makes the starting point whatever the current CSS says, so
+  // this stays correct across the media-query breakpoints rather than baking
+  // in whichever size happened to apply the first time it ran.
+  el.style.fontSize = '';
+  const avail = el.clientWidth;
+  if (!avail) return; // not laid out yet (display:none ancestor)
+  const max = parseFloat(getComputedStyle(el).fontSize);
+  if (!max) return;
+  const min = Math.max(10, max * 0.55);
+  let size = max;
+  while (size > min && titleTextWidth(el, size) > avail) size -= 0.5;
+  if (size < max) el.style.fontSize = size + 'px';
+}
+
+function fitTitleFields() {
+  ['book-title-field', 'chapter-title-field', 'chapter-dates-field']
+    .forEach(id => fitTitleField(document.getElementById(id)));
+}
+
+// Fitting once at load is not enough: the reader area also changes width when
+// the panel is collapsed or reopened (which init does on phones, right after
+// the first fit) and when the TOC drawer moves. Measuring at the wrong moment
+// shrank a short date line to the 10px floor and left it there.
+let lastTitleFitWidth = 0;
+function observeTitleFit() {
+  // The very first measurement is the one most likely to be wrong: it can run
+  // before the final layout or before the font metrics are settled, and a
+  // too-early measurement shrinks a title that would have fit and then leaves
+  // it there. Re-fit once after paint, and again once fonts report ready.
+  requestAnimationFrame(() => fitTitleFields());
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => fitTitleFields()).catch(() => {});
+  }
+
+  const box = document.querySelector('.reader-inner');
+  if (!box || typeof ResizeObserver === 'undefined') return;
+  new ResizeObserver((entries) => {
+    // Width only. Refitting changes the type size, which changes this box's
+    // height, which would otherwise re-trigger the observer forever.
+    const w = Math.round(entries[0].contentRect.width);
+    if (w === lastTitleFitWidth) return;
+    lastTitleFitWidth = w;
+    fitTitleFields();
+  }).observe(box);
+}
+
 function syncTitleFieldsFromState() {
   const bookEl = document.getElementById('book-title-field');
   const chapterEl = document.getElementById('chapter-title-field');
@@ -484,6 +569,7 @@ function syncTitleFieldsFromState() {
   const hasDates = !!chapterDates;
   if (datesEl) datesEl.classList.toggle('hidden', !hasDates);
   if (addBtn) addBtn.classList.toggle('hidden', hasDates);
+  fitTitleFields();
 }
 
 function populateChapterSelect() {
@@ -701,7 +787,14 @@ async function onSentenceClick(span, sentenceText) {
     if (activeSpan === span) renderResult(result, sentenceText);
   } catch (err) {
     const errResult = { error: (err && err.message) || String(err) };
-    cache.set(cacheKey, errResult);
+    // A timeout or dropped connection says nothing about this sentence, so
+    // caching it would make one bad moment look permanent: the reader would
+    // come back later, see the stale error again, and have to find the retry
+    // button. Configuration errors (bad key, bad request) do get cached --
+    // they'll reproduce anyway, and re-asking just burns quota.
+    if (!(err && err.transient)) {
+      cache.set(cacheKey, errResult);
+    }
     if (activeSpan === span) renderResult(errResult, sentenceText);
   }
 }
@@ -753,14 +846,20 @@ function renderResult(result, sentenceText) {
   const followUps = (result.history || []).slice(2);
 
   body.innerHTML = `
-    <div class="section-tabs">
-      <button class="tab-btn active" data-tab="grammar">${t('panel.tabGrammar')}</button>
-      <button class="tab-btn" data-tab="vocab">${t('panel.tabVocab')}</button>
+    <div class="section-tabs" role="tablist" aria-label="${escapeHtml(t('panel.title'))}">
+      <button class="tab-btn active" data-tab="grammar" role="tab"
+              id="tab-grammar" aria-controls="tabpanel-grammar"
+              aria-selected="true" tabindex="0">${t('panel.tabGrammar')}</button>
+      <button class="tab-btn" data-tab="vocab" role="tab"
+              id="tab-vocab" aria-controls="tabpanel-vocab"
+              aria-selected="false" tabindex="-1">${t('panel.tabVocab')}</button>
       <button class="reanalyze-btn" id="reanalyze-btn" title="${escapeHtml(t('panel.reanalyze'))}"
               aria-label="${escapeHtml(t('panel.reanalyze'))}">⟳</button>
     </div>
-    <div class="tab-panel active" data-tab="grammar"><div class="analysis-md">${result.grammarHtml}</div></div>
-    <div class="tab-panel" data-tab="vocab"><div class="analysis-md">${result.vocabHtml}</div></div>
+    <div class="tab-panel active" data-tab="grammar" role="tabpanel"
+         id="tabpanel-grammar" aria-labelledby="tab-grammar"><div class="analysis-md">${result.grammarHtml}</div></div>
+    <div class="tab-panel" data-tab="vocab" role="tabpanel"
+         id="tabpanel-vocab" aria-labelledby="tab-vocab"><div class="analysis-md">${result.vocabHtml}</div></div>
     <div class="chat-section">
       <div class="chat-thread" id="chat-thread">${renderChatTurns(followUps)}</div>
       <div class="chat-input-row">
@@ -769,12 +868,38 @@ function renderResult(result, sentenceText) {
       </div>
     </div>
   `;
-  body.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      body.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      body.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      btn.classList.add('active');
-      body.querySelector(`.tab-panel[data-tab="${btn.dataset.tab}"]`).classList.add('active');
+  const tabs = [...body.querySelectorAll('.tab-btn')];
+
+  // Roving tabindex: the tablist is one Tab stop and the arrow keys move
+  // between tabs inside it, which is what a screen-reader user expects of
+  // role="tablist" -- and what makes Tab still reach the chat box in one press
+  // instead of two.
+  function selectTab(btn, { focus = false } = {}) {
+    tabs.forEach(b => {
+      const on = b === btn;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+      b.tabIndex = on ? 0 : -1;
+    });
+    body.querySelectorAll('.tab-panel').forEach(p => {
+      p.classList.toggle('active', p.dataset.tab === btn.dataset.tab);
+    });
+    if (focus) btn.focus();
+  }
+
+  tabs.forEach((btn, i) => {
+    btn.addEventListener('click', () => selectTab(btn));
+    btn.addEventListener('keydown', (e) => {
+      const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (step) {
+        e.preventDefault();
+        selectTab(tabs[(i + step + tabs.length) % tabs.length], { focus: true });
+        return;
+      }
+      if (e.key === 'Home' || e.key === 'End') {
+        e.preventDefault();
+        selectTab(e.key === 'Home' ? tabs[0] : tabs[tabs.length - 1], { focus: true });
+      }
     });
   });
 
@@ -1008,8 +1133,9 @@ ${transLabel}〈这里填这句话完整、通顺、自然的整句翻译〉
 ## ${terms.vocab}
 - 列出这句话里较生僻、较书面、或带有特殊语境色彩的词汇或短语（不用列出简单常见词）。
 - 极其重要：词条只能从【用户要求分析的这一句话本身】中挑选，禁止选取仅出现在你收到的上下文段落、但没有出现在这句话原文里的词/短语——上下文段落只是用来帮你理解代词指代和前后文关系的背景资料，不是分析对象。如果不确定某个词是否真的出现在目标句子里，就不要列出它。
-- 每个词条格式：*原词* — 释义，并按词性附加以下信息（不适用的项跳过，不要生造不存在的变化形式）：
-  - 名词：标出语法性/词性（如德语的 der/die/das，法语、俄语等语言的阳性/阴性/中性等，视该语言实际语法特点而定；分析中文、英文等没有语法性的语言则跳过这一项），以及复数形式。
+- 每个词条格式：*原词* — 释义，然后**只**按这个词自己的词性附加下面对应的一条信息。
+  - 每个词条只属于一个词性。不属于的那些类别**整条略去、一个字都不要写**，禁止出现「动词：不适用」「无比较级」「N/A」「—」这类占位说明，也不要生造不存在的变化形式。
+  - 名词：给出该语言的语法性，并且**只写这个词实际的那一个定冠词**。德语的定冠词是 der、die、das 三者之一，必须三选一：Erdbeben 是中性，就只写 das，写成「der/das」或列出多个是错的。（法语、俄语等按该语言的阳性/阴性/中性体例；中文、英文等没有语法性的语言，这一项整条略去。）此外给出复数形式。
   - 动词：标出该语言里对识别这个词有帮助的核心变位形式（例如德语给出第三人称单数现在时、过去式 Präteritum、过去分词 Partizip II 三种形式；其他语言按该语言惯例给出对应的原形/变位提示）。
   - 形容词等其他词性：如有值得注意的变格/比较级等形式也可以简要补充，没有就不提。
 - 如果句子里夹杂其他语言的词汇，也一并标注并解释。
@@ -1067,9 +1193,14 @@ function buildProviderRequest(provider, ps, systemPrompt, messages) {
   if (provider === 'gemini') {
     const baseUrl = (ps.baseUrl || PROVIDER_DEFAULTS.gemini.baseUrl).replace(/\/+$/, '');
     const model = ps.model || PROVIDER_DEFAULTS.gemini.model;
+    // The key goes in a header, not the query string: URLs end up in browser
+    // history, proxy logs and Referer headers, and a key that leaks there
+    // leaks silently.
+    const headers = { 'Content-Type': 'application/json' };
+    if (ps.apiKey) headers['x-goog-api-key'] = ps.apiKey;
     return {
-      url: `${baseUrl}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(ps.apiKey)}`,
-      headers: { 'Content-Type': 'application/json' },
+      url: `${baseUrl}/models/${encodeURIComponent(model)}:generateContent`,
+      headers,
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: systemPrompt }] },
         // Gemini calls the AI turn "model", not "assistant"
@@ -1113,44 +1244,76 @@ function extractProviderText(provider, data) {
   return textBlocks.join('\n');
 }
 
+// Matches server.py's own --timeout default. Deliberately generous: some
+// providers and reasoning-heavy models really do take minutes on a long
+// sentence, and cutting off a slow-but-working answer is worse than waiting.
+const REQUEST_TIMEOUT_MS = 180000;
+
+// Marks a failure as "worth trying again" -- a timeout, a dropped connection,
+// a 5xx. onSentenceClick keeps these out of the analysis cache so one bad
+// moment doesn't stick to a sentence until the reader notices the retry button.
+function transientError(message) {
+  const err = new Error(message);
+  err.transient = true;
+  return err;
+}
+
 async function callProvider(systemPrompt, messages) {
   const provider = settings.provider || 'anthropic';
-  const ps = currentProviderSettings();
+  const ps = effectiveProviderSettings(provider);
   const hasKey = !!ps.apiKey;
 
   // Only Anthropic has a keyless fallback (the claude.ai sandbox proxy).
-  // OpenAI/Gemini calls always need a user-supplied key.
-  if (!hasKey && provider !== 'anthropic') {
+  // OpenAI/Gemini otherwise need a key -- unless the Base URL points at a
+  // proxy, which typically supplies the key itself.
+  if (!hasKey && provider !== 'anthropic' && !isProxiedProvider(provider, ps)) {
     throw new Error(t('errors.providerKeyRequired', { provider: PROVIDER_LABELS[provider] || provider }));
   }
 
   const req = buildProviderRequest(provider, ps, systemPrompt, messages);
 
+  // A provider that accepts the connection and then never answers would
+  // otherwise leave the panel spinning forever. Purely time-driven on purpose:
+  // clicking another sentence must NOT abort this request. It is allowed to
+  // finish and populate the cache (see onSentenceClick), so coming back to
+  // this sentence is instant instead of paying for the analysis twice.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
   let response;
   try {
-    response = await fetch(req.url, { method: 'POST', headers: req.headers, body: req.body });
+    response = await fetch(req.url, {
+      method: 'POST', headers: req.headers, body: req.body, signal: controller.signal,
+    });
   } catch (networkErr) {
     // fetch() itself throws (rather than resolving with a bad status) on
     // network failures, including CORS preflight rejections
-    if (!hasKey) throw new Error(t('errors.noKeyNetworkFail'));
-    throw new Error(t('errors.networkFail'));
+    if (networkErr && networkErr.name === 'AbortError') throw transientError(t('errors.timeout'));
+    if (!hasKey) throw transientError(t('errors.noKeyNetworkFail'));
+    throw transientError(t('errors.networkFail'));
+  } finally {
+    clearTimeout(timer);
   }
 
   if (!response.ok) {
     let detail = '';
     try {
       const errJson = await response.json();
-      detail = errJson && errJson.error && errJson.error.message ? `：${errJson.error.message}` : '';
+      detail = errJson && errJson.error && errJson.error.message ? `: ${errJson.error.message}` : '';
     } catch (e) { /* body may not be JSON */ }
-    if (!hasKey) throw new Error(t('errors.noKeyStatusFail', { status: response.status, detail }));
-    if (response.status === 401 || response.status === 403) throw new Error(t('errors.invalidKey', { detail }));
-    if (response.status === 429) throw new Error(t('errors.rateLimited', { detail }));
-    throw new Error(t('errors.apiFailed', { status: response.status, detail }));
+    // 5xx and 429 are worth retrying; a rejected key or a bad request is not,
+    // so only the former are marked transient (and thus kept out of the cache).
+    const retryable = response.status === 429 || response.status >= 500;
+    const fail = (msg) => { throw retryable ? transientError(msg) : new Error(msg); };
+    if (!hasKey) fail(t('errors.noKeyStatusFail', { status: response.status, detail }));
+    if (response.status === 401 || response.status === 403) fail(t('errors.invalidKey', { detail }));
+    if (response.status === 429) fail(t('errors.rateLimited', { detail }));
+    fail(t('errors.apiFailed', { status: response.status, detail }));
   }
 
   const data = await response.json();
   const fullText = extractProviderText(provider, data);
-  if (!fullText || !fullText.trim()) throw new Error(t('errors.emptyResponse'));
+  if (!fullText || !fullText.trim()) throw transientError(t('errors.emptyResponse'));
   return fullText;
 }
 

@@ -1,0 +1,60 @@
+# Publishes the built single file to GitHub Pages.
+#
+# This is what makes Lingua Lector usable on a phone. The app itself is one
+# self-contained HTML file, and on a desktop you can just double-click it --
+# but that route is closed on mobile:
+#
+#   * Android browsers refuse fetch()/XHR from a file:// page, so the app
+#     loads and then silently cannot reach any AI provider.
+#   * iOS has no way to open a local .html as a real web page at all. The
+#     Files app shows it in Quick Look, which does not execute JavaScript.
+#
+# Served over https those problems disappear -- a real origin gets working
+# fetch, localStorage, and "Add to Home Screen". Nothing about the artifact
+# changes; it is the same single file, just reachable by URL.
+#
+# ONE-TIME SETUP: repository Settings -> Pages -> Source: "GitHub Actions".
+# Until that is switched on this workflow will fail at the deploy step.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'dist/lingua-lector.html'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; queue instead of cancelling, so a push that
+# lands mid-deploy still ends up published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # dist/lingua-lector.html is committed, so there is nothing to build.
+      # Pages serves index.html for the site root, hence the rename.
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp dist/lingua-lector.html _site/index.html
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

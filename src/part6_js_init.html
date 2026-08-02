@@ -89,6 +89,73 @@ function syncProviderFieldsVisibility() {
   });
 }
 
+// The chip rows are radio groups in everything but markup: exactly one choice,
+// mutually exclusive. As bare <div>s they were unreachable by keyboard and
+// silent to a screen reader. Roles and arrow-key handling are added here, in
+// one place, instead of five copies of the same click wiring.
+//
+// Selection state still lives in the .selected class, because several other
+// code paths set it directly; syncRadioGroupAria derives the ARIA state from
+// that class so the two cannot drift apart.
+function syncRadioGroupAria(container) {
+  const chips = [...container.querySelectorAll('.radio-chip')];
+  const selected = chips.find(c => c.classList.contains('selected'));
+  chips.forEach(chip => {
+    const on = chip === selected;
+    chip.setAttribute('aria-checked', on ? 'true' : 'false');
+    // Roving tabindex: one Tab stop per group, arrows move inside it. The
+    // fallback keeps a group with nothing selected reachable at all.
+    chip.tabIndex = (on || (!selected && chip === chips[0])) ? 0 : -1;
+  });
+}
+
+function syncAllRadioGroupAria() {
+  document.querySelectorAll('.radio-row').forEach(syncRadioGroupAria);
+}
+
+function wireRadioGroup(containerId, onSelect) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.setAttribute('role', 'radiogroup');
+
+  // Point at the live <label> element rather than copying its text, so the
+  // accessible name follows a UI-language switch instead of going stale.
+  const label = container.parentElement && container.parentElement.querySelector('label');
+  if (label) {
+    if (!label.id) label.id = containerId + '-label';
+    container.setAttribute('aria-labelledby', label.id);
+  }
+
+  const chips = [...container.querySelectorAll('.radio-chip')];
+
+  function select(chip, { focus = false } = {}) {
+    chips.forEach(c => c.classList.toggle('selected', c === chip));
+    syncRadioGroupAria(container);
+    if (focus) chip.focus();
+    if (onSelect) onSelect(chip);
+  }
+
+  chips.forEach((chip, i) => {
+    chip.setAttribute('role', 'radio');
+    chip.addEventListener('click', () => select(chip));
+    chip.addEventListener('keydown', (e) => {
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        select(chip);
+        return;
+      }
+      const step = (e.key === 'ArrowRight' || e.key === 'ArrowDown') ? 1
+        : (e.key === 'ArrowLeft' || e.key === 'ArrowUp') ? -1 : 0;
+      if (!step) return;
+      // Arrow keys in a radio group move *and* select, which is the standard
+      // behaviour and what makes the group usable without a pointer.
+      e.preventDefault();
+      select(chips[(i + step + chips.length) % chips.length], { focus: true });
+    });
+  });
+  syncRadioGroupAria(container);
+}
+
 function syncSettingsFormFromState() {
   document.querySelectorAll('#provider-chips .radio-chip').forEach(chip => {
     chip.classList.toggle('selected', chip.dataset.provider === settings.provider);
@@ -128,6 +195,10 @@ function syncSettingsFormFromState() {
   document.getElementById('font-family-select').value = settings.fontFamily || 'serif';
   document.getElementById('font-size-input').value = settings.fontSize || 19;
   document.getElementById('font-size-value').textContent = (settings.fontSize || 19) + 'px';
+
+  // Every block above sets .selected directly, so re-derive the ARIA state
+  // from it once here rather than at each site.
+  syncAllRadioGroupAria();
 
   populateChapterSelect();
   renderDocLibraryList();
@@ -200,42 +271,20 @@ function wireSettingsModal() {
   });
   wireSettingsTabs();
 
-  document.querySelectorAll('#provider-chips .radio-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('#provider-chips .radio-chip').forEach(c => c.classList.remove('selected'));
-      chip.classList.add('selected');
-      settings.provider = chip.dataset.provider;
-      syncProviderFieldsVisibility();
-    });
+  wireRadioGroup('provider-chips', (chip) => {
+    settings.provider = chip.dataset.provider;
+    syncProviderFieldsVisibility();
   });
-  document.querySelectorAll('#lang-rule-chips .radio-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('#lang-rule-chips .radio-chip').forEach(c => c.classList.remove('selected'));
-      chip.classList.add('selected');
-    });
+  wireRadioGroup('lang-rule-chips');
+  wireRadioGroup('output-lang-chips', (chip) => {
+    document.getElementById('output-lang-custom-input').style.display =
+      chip.dataset.outlang === 'custom' ? 'block' : 'none';
   });
-  document.querySelectorAll('#output-lang-chips .radio-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('#output-lang-chips .radio-chip').forEach(c => c.classList.remove('selected'));
-      chip.classList.add('selected');
-      document.getElementById('output-lang-custom-input').style.display =
-        chip.dataset.outlang === 'custom' ? 'block' : 'none';
-    });
+  wireRadioGroup('pagination-mode-chips', (chip) => {
+    document.getElementById('paras-per-page-wrap').style.display =
+      chip.dataset.mode === 'none' ? 'none' : 'block';
   });
-  document.querySelectorAll('#pagination-mode-chips .radio-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('#pagination-mode-chips .radio-chip').forEach(c => c.classList.remove('selected'));
-      chip.classList.add('selected');
-      document.getElementById('paras-per-page-wrap').style.display =
-        chip.dataset.mode === 'none' ? 'none' : 'block';
-    });
-  });
-  document.querySelectorAll('#theme-chips .radio-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('#theme-chips .radio-chip').forEach(c => c.classList.remove('selected'));
-      chip.classList.add('selected');
-    });
-  });
+  wireRadioGroup('theme-chips');
   document.getElementById('font-size-input').addEventListener('input', (e) => {
     document.getElementById('font-size-value').textContent = e.target.value + 'px';
   });
@@ -378,11 +427,18 @@ function wireTitleFields() {
     saveTextToLocalStorage();
   });
 
+  // 'change' only fires on blur, so without this a title being typed would
+  // run past the edge until the reader clicked away.
+  [bookEl, chapterEl, datesEl].forEach(el => {
+    el.addEventListener('input', () => fitTitleField(el));
+  });
+
   const addDatesBtn = document.getElementById('btn-add-dates');
   if (addDatesBtn) {
     addDatesBtn.addEventListener('click', () => {
       datesEl.classList.remove('hidden');
       addDatesBtn.classList.add('hidden');
+      fitTitleField(datesEl); // only measurable now that it isn't display:none
       datesEl.focus();
     });
   }
@@ -396,6 +452,7 @@ document.getElementById('btn-toggle-panel').addEventListener('click', togglePane
 
 (async function init() {
   loadSettingsFromLocalStorage();
+  adoptProxyProviderIfNeeded();
   applyTheme();
   applyFont();
   populateUiLangSelect();
@@ -405,6 +462,7 @@ document.getElementById('btn-toggle-panel').addEventListener('click', togglePane
   await loadInitialDocument();
 
   wireTitleFields();
+  observeTitleFit();
   wireSettingsModal();
   wireSettingsFocusTrap();
   wirePagerControls();
@@ -419,7 +477,18 @@ document.getElementById('btn-toggle-panel').addEventListener('click', togglePane
   const savedPage = await loadProgress();
   renderPage(savedPage);
 
-  if (!currentProviderSettings().apiKey) {
+  // On a phone the text and the analysis cannot both be usable at once, so the
+  // reader starts with the whole screen for reading; tapping a sentence opens
+  // the panel, which onSentenceClick already does. Decided once at startup
+  // rather than on resize -- collapsing the panel out from under someone who
+  // merely rotated the device would be worse than starting on the wrong foot.
+  if (window.matchMedia('(max-width: 520px)').matches && !panelEl.classList.contains('collapsed')) {
+    togglePanel();
+  }
+
+  // Nothing to configure when the proxy serving this page holds the key, so
+  // don't open settings to ask for one.
+  if (!currentProviderSettings().apiKey && !proxyInfoFor(settings.provider)) {
     // gentle nudge, not blocking: open settings automatically only the very
     // first time (no settings saved yet at all)
     const neverConfigured = !localStorage.getItem(SETTINGS_KEY);

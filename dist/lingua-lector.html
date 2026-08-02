@@ -210,6 +210,10 @@
     font-family: inherit;
     color: inherit;
     outline: none;
+    /* fitTitleField() shrinks these to fit, but it stops at a legibility
+       floor -- past that, an over-long title ends in "…" rather than being
+       chopped mid-word. */
+    text-overflow: ellipsis;
   }
   .book-title-input {
     font-size: 14px;
@@ -400,6 +404,9 @@
     color: var(--on-accent);
   }
   .toolbar button.primary:hover { background: var(--accent-hover); color: var(--on-accent); }
+  /* only becomes a flex break at the phone breakpoint */
+  .toolbar-break { display: none; }
+
   .toolbar .hint {
     font-size: 12px;
     color: #a89a82;
@@ -503,6 +510,15 @@
      :hover stays as the no-JS/again-cheap path for single-segment sentences. */
   .sent:hover, .sent.hover { background: var(--highlight); }
   .sent.active, .sent.active.hover { background: var(--accent-soft); color: var(--on-accent); }
+  /* Touch has no :hover, so before this a tap gave no feedback at all: the
+     analysis takes a moment to arrive, and until it did, a tap that registered
+     and a tap that missed the text looked identical. That reads as "tapping
+     does nothing" and was reported as exactly that on Android. :active fires
+     the instant the finger lands. The default tap highlight is suppressed
+     because it is a blue rectangle around the *element* box, which on a
+     sentence spanning three wrapped lines is a full-width flash. */
+  .sent:active { background: var(--accent-soft); color: var(--on-accent); }
+  .sent { -webkit-tap-highlight-color: transparent; }
   /* keyboard users must be able to see which sentence they are on */
   .sent:focus-visible {
     outline: 2px solid var(--accent);
@@ -883,6 +899,12 @@
     user-select: none;
   }
   .radio-chip.selected { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  /* these are role="radio" divs reached with the arrow keys -- without a ring
+     a keyboard user cannot tell which chip they are on */
+  .radio-chip:focus-visible, .tab-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
 
   .key-warning {
     background: var(--warning-bg);
@@ -950,6 +972,81 @@
     p.para { font-size: 18px; }
     .toolbar { padding: 12px 20px 0; max-width: none; }
   }
+
+  /* Phones. The 900px rules above already stack the panel under the reader;
+     what a narrow screen additionally needs is thumb-sized hit targets and
+     less horizontal padding, so the line length stays readable instead of
+     collapsing to a few words per line.
+     No swipe-to-page gesture: an app whose whole interaction is "tap the
+     sentence you want explained" cannot also treat horizontal drags as page
+     turns without one stealing from the other. The pager buttons below are
+     sized to be reachable with a thumb instead. */
+  @media (max-width: 520px) {
+    .reader-inner { padding: 14px 14px 100px; }
+    .toolbar { padding: 10px 14px 0; }
+    .bottom-pager { left: 14px; right: 14px; }
+    /* Looser leading is the only way to make an inline sentence easier to hit
+       with a fingertip -- the target cannot be padded without disturbing the
+       text flow, so the line it sits on is made taller instead. */
+    p.para { font-size: 17px; line-height: 1.95; }
+
+    /* 44px is the smallest reliably tappable target. */
+    .pager-prev, .pager-next, .btn, .panel-close, .modal-close {
+      min-height: 44px;
+      padding-top: 10px;
+      padding-bottom: 10px;
+    }
+    .settings-tab-btn { min-height: 44px; }
+    .radio-chip {
+      min-height: 44px;
+      display: inline-flex;
+      align-items: center;
+      font-size: 13.5px;
+    }
+    .tab-btn { min-height: 44px; }
+
+    /* Keep the top pager, but give it a row of its own rather than letting it
+       wrap into the same line as Contents / panel / Settings -- six controls
+       on one 375px line leaves each too small to hit, and the pager is what
+       you reach for most while reading.
+       Reordering rather than reflowing the markup: the buttons keep their
+       document order (so keyboard and screen-reader order is unchanged) and
+       .toolbar-break is a zero-height full-width flex item that forces the
+       wrap to land in exactly one place. */
+    .toolbar { row-gap: 6px; }
+    .toolbar > * { order: 1; }
+    .toolbar-break { display: block; order: 2; flex-basis: 100%; height: 0; }
+    .toolbar .pager-prev,
+    .toolbar .pager-status,
+    .toolbar .pager-next { order: 3; }
+
+    /* The hint advertises "← → to turn pages, Esc to close" -- keyboard advice
+       on a device with no keyboard. */
+    .toolbar .hint { display: none; }
+
+    /* Roomy enough to read an analysis in without scrolling constantly. It
+       only applies once a sentence has been tapped: the panel starts
+       collapsed on phones (see init), so the reader gets the whole screen. */
+    .panel { height: 60vh; }
+
+    .toc-sidebar { width: 86vw; }
+
+    /* Settings is a full-screen sheet here rather than a centred dialog --
+       a modal with margins on a 375px screen wastes most of the width. */
+    .modal {
+      width: 100%;
+      max-width: none;
+      height: 100%;
+      max-height: none;
+      border-radius: 0;
+    }
+    .modal-body { padding: 14px; }
+
+    /* The running header is an <input>, so a long "Author · Title" cannot wrap
+       and simply gets cut off at this width. Tightening the tracking and size
+       fits considerably more of it before that happens. */
+    .book-title-input { font-size: 12px; letter-spacing: 0.06em; }
+  }
   /* Readers who get motion sickness or migraines from animation ask the OS to
      suppress it. The page-turn transform is the main offender here -- a whole
      screen of text sliding sideways -- but blanket-disabling every transition
@@ -985,6 +1082,9 @@
       <span class="pager-status"><span class="pager-status-prefix" data-i18n="toolbar.pagerPrefix">第 </span><input type="number" class="pager-page-input" min="1" value="1" data-i18n-label="toolbar.pageInputLabel"> / <span class="pager-total">1</span><span class="pager-status-suffix" data-i18n="toolbar.pagerSuffix"> 页</span></span>
       <button class="pager-next" data-i18n="toolbar.nextPage">下一页 →</button>
       <button id="btn-open-settings" data-i18n="toolbar.openSettings">⚙ 设置</button>
+      <!-- Forces the pager onto its own row on phones; display:none otherwise.
+           Purely presentational, hence aria-hidden. -->
+      <div class="toolbar-break" aria-hidden="true"></div>
       <span class="hint" data-i18n="toolbar.hint">点击任意句子查看语法与词汇解析 · 快捷键 ← → 翻页 · Esc 关闭</span>
     </div>
     <div class="reader-inner">
@@ -1304,7 +1404,7 @@ const CHAPTER_INDEX_KEY_PREFIX = 'lingua-lector-chapter-idx-';
 // snapped back to the document's default chapter regardless of where the
 // reader actually was.
 function saveCurrentChapterIndex() {
-  try { localStorage.setItem(CHAPTER_INDEX_KEY_PREFIX + currentDocId, String(currentChapterIndex)); } catch (e) { /* ignore */ }
+  safeStorageWrite(() => localStorage.setItem(CHAPTER_INDEX_KEY_PREFIX + currentDocId, String(currentChapterIndex)));
 }
 
 function loadSavedChapterIndex(docId, maxIndex) {
@@ -1348,6 +1448,61 @@ function currentProviderSettings() {
   return settings.providers[settings.provider] || PROVIDER_DEFAULTS.anthropic;
 }
 
+// server.py injects this when it serves the page, naming the providers it
+// holds a key for (see _inject_proxy_config there). The name deliberately
+// avoids the double-underscore-wrapped spelling: that shape is reserved for
+// build-time placeholders, and build-integrity.test.js asserts none survive
+// into the built file. Read once, and kept out of
+// `settings` on purpose: it describes whichever server happens to be serving
+// this page right now, so persisting it would leave a dead localhost URL in
+// the reader's settings the next time they open the file directly.
+const PROXY_CONFIG = (typeof window !== 'undefined' && window.LINGUA_LECTOR_PROXY) || null;
+
+function proxyInfoFor(provider) {
+  const info = PROXY_CONFIG && PROXY_CONFIG.providers && PROXY_CONFIG.providers[provider];
+  return info && info.hasServerKey ? info : null;
+}
+
+// A Base URL pointing somewhere other than the provider's own API host is, in
+// practice, a proxy: server.py, the Cloudflare Worker, or a company gateway.
+// Those routinely hold the key themselves, so demanding one in the app would
+// block a setup that works fine.
+function isProxiedProvider(provider, ps) {
+  if (ps && ps.keyHeldByProxy) return true;
+  const configured = ((ps && ps.baseUrl) || '').trim().replace(/\/+$/, '');
+  if (!configured) return false;
+  const dflt = ((PROVIDER_DEFAULTS[provider] || {}).baseUrl || '').replace(/\/+$/, '');
+  // Anthropic's default is empty (it's called directly), so any Base URL at
+  // all means the reader has pointed it at something of their own.
+  return configured !== dflt;
+}
+
+// What a request should actually use: the reader's settings, except that a
+// proxy serving this page and holding this provider's key supplies the Base
+// URL and removes the need for a key field.
+function effectiveProviderSettings(provider) {
+  const ps = settings.providers[provider] || PROVIDER_DEFAULTS.anthropic;
+  const proxy = proxyInfoFor(provider);
+  if (!proxy) return ps;
+  return { ...ps, baseUrl: proxy.baseUrl, keyHeldByProxy: true };
+}
+
+// Someone who starts `server.py --gemini-key ...` means to use Gemini. Without
+// this they'd land on whatever provider was selected before, get "no API key",
+// and have to go into settings anyway -- which is exactly what serving the
+// config was meant to avoid. Only fires when the current provider genuinely
+// can't be used, so it never overrides a deliberate choice.
+function adoptProxyProviderIfNeeded() {
+  if (!PROXY_CONFIG || !PROXY_CONFIG.providers) return;
+  const usable = (provider) => {
+    const ps = settings.providers[provider];
+    return !!(ps && (ps.apiKey || proxyInfoFor(provider) || isProxiedProvider(provider, ps)));
+  };
+  if (usable(settings.provider)) return;
+  const fallback = Object.keys(PROXY_CONFIG.providers).find(usable);
+  if (fallback) settings.provider = fallback;
+}
+
 let settings = { ...DEFAULT_SETTINGS };
 
 // ============================================================
@@ -1377,10 +1532,10 @@ function isExampleRemoved() {
 }
 
 function setExampleRemoved(removed) {
-  try {
+  safeStorageWrite(() => {
     if (removed) localStorage.setItem(EXAMPLE_REMOVED_KEY, '1');
     else localStorage.removeItem(EXAMPLE_REMOVED_KEY);
-  } catch (e) { /* ignore */ }
+  });
 }
 
 function docStorageKey(id) {
@@ -1400,7 +1555,7 @@ function loadDocIndex() {
 }
 
 function saveDocIndex(index) {
-  try { localStorage.setItem(DOC_INDEX_KEY, JSON.stringify(index)); } catch (e) { /* ignore */ }
+  safeStorageWrite(() => localStorage.setItem(DOC_INDEX_KEY, JSON.stringify(index)));
 }
 
 function upsertDocIndexEntry(entry) {
@@ -1546,13 +1701,37 @@ async function migrateBlobsToIdb(backend) {
   }
 }
 
+// Opening the database is not proof that it works. Firefox and Safari in
+// private browsing, and any browser sitting at its storage limit, can hand
+// back a connection that looks fine and then aborts every transaction.
+//
+// Trusting the open alone loses the whole library: migrateBlobsToIdb() fails
+// per key and correctly leaves each document in localStorage, but the backend
+// has already been switched, so every later read goes to IndexedDB, rejects,
+// and loadDocumentContent turns the rejection into null -- every document
+// opens blank while its text is still on disk. So prove a round trip first.
+const BLOB_PROBE_KEY = 'lingua-lector-blob-probe';
+
+async function idbBackendWorks(backend) {
+  try {
+    await backend.set(BLOB_PROBE_KEY, '1');
+    const got = await backend.get(BLOB_PROBE_KEY);
+    await backend.remove(BLOB_PROBE_KEY);
+    return got === '1';
+  } catch (e) {
+    return false;
+  }
+}
+
 function initBlobStore() {
   if (blobStoreReady) return blobStoreReady;
   blobStoreReady = (async () => {
     const factory = (typeof indexedDB !== 'undefined' && indexedDB) ? indexedDB : null;
     const db = await openIdbWithTimeout(factory, BLOB_OPEN_TIMEOUT_MS);
     if (!db) return blobBackend; // localStorage, as before
-    blobBackend = idbBlobBackend(db);
+    const candidate = idbBlobBackend(db);
+    if (!(await idbBackendWorks(candidate))) return blobBackend; // same fallback
+    blobBackend = candidate;
     await migrateBlobsToIdb(blobBackend);
     return blobBackend;
   })();
@@ -1612,6 +1791,32 @@ function reportStorageError(err) {
     ? t('storage.full', { backend: blobBackend.name })
     : t('storage.writeFailed', { msg: (err && err.message) || String(err) });
   try { setImportStatus(msg, 'error'); } catch (e) { /* settings panel not built yet */ }
+}
+
+// Background writes -- reading progress, the document index, settings -- happen
+// constantly and without the reader asking for them, so they can't report every
+// failure the way an import does: a full disk would mean a message per page
+// turn. Staying completely silent is what made these failures invisible
+// though; the reader closes the tab, loses their place, and never learns why.
+// So: say it once, then stop.
+let backgroundStorageErrorReported = false;
+
+function reportBackgroundStorageError(err) {
+  if (backgroundStorageErrorReported) return;
+  backgroundStorageErrorReported = true;
+  reportStorageError(err);
+}
+
+// For writes whose failure the reader can't act on immediately. Returns whether
+// it worked, for the callers that care.
+function safeStorageWrite(fn) {
+  try {
+    fn();
+    return true;
+  } catch (e) {
+    reportBackgroundStorageError(e);
+    return false;
+  }
 }
 
 async function loadDocumentContent(id) {
@@ -1676,9 +1881,7 @@ function loadSettingsFromLocalStorage() {
 }
 
 function saveSettingsToLocalStorage() {
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  } catch (e) { /* storage may be unavailable (private browsing, quota) */ }
+  safeStorageWrite(() => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)));
 }
 
 // Resolves true when the document's text is actually on disk. The index entry
@@ -1700,7 +1903,7 @@ async function saveCurrentDocumentContent() {
     savedAt: Date.now(),
     builtin: currentDocId === BOOK_DOC_ID,
   });
-  try { localStorage.setItem(CURRENT_DOC_POINTER_KEY, currentDocId); } catch (e) { /* ignore */ }
+  safeStorageWrite(() => localStorage.setItem(CURRENT_DOC_POINTER_KEY, currentDocId));
   return true;
 }
 
@@ -2322,7 +2525,7 @@ const I18N = {
     'toolbar.hint': '点击任意句子查看语法与词汇解析 · 快捷键 ← → 翻页 · Esc 关闭',
     'panel.title': '句子解析',
     'panel.closeTitle': '收起侧栏',
-    'panel.emptyMsg': '点击左侧正文中的任意一句，<br>这里会显示句子结构拆解和词汇讲解。',
+    'panel.emptyMsg': '点击正文中的任意一句，<br>这里会显示句子结构拆解和词汇讲解。',
     'panel.loading': '正在解析这句话…',
     'panel.retry': '重试',
     'panel.reanalyze': '重新解析这句话（跳过缓存）',
@@ -2341,6 +2544,7 @@ const I18N = {
     'book.chapterFallback': '第 {n} 章',
     'errors.noKeyNetworkFail': '网络请求失败。如果你不在 claude.ai 里运行本工具，请在设置中填入你自己的 API key。如果你确实在 claude.ai 沙盒里，请检查网络连接后重试。',
     'errors.networkFail': '网络请求失败：可能是断网、被浏览器扩展拦截，或被 CORS 拒绝。如果是 CORS，可改用 Gemini（没有此限制），或按 README 启动 server.py / Cloudflare Worker 代理。',
+    'errors.timeout': '请求超时：等待 3 分钟后仍无响应，可能是模型太慢或服务商没有回应。可以再点一次这句话重试，或在设置里换一个更快的模型。',
     'errors.noKeyStatusFail': '请求失败（状态码 {status}）{detail}。如果你不在 claude.ai 里运行本工具，请在设置中填入你自己的 API key。',
     'errors.invalidKey': 'API key 被拒绝（状态码 401/403）{detail}。请检查 key 是否填错、是否已过期，以及它是否属于当前选中的服务商——把 OpenAI 的 key 填进 Anthropic 一栏是最常见的原因。',
     'errors.rateLimited': '请求过于频繁或已达用量上限（状态码 429）{detail}',
@@ -2454,7 +2658,7 @@ const I18N = {
     'toolbar.hint': '點擊任意句子查看語法與詞彙解析 · 快捷鍵 ← → 翻頁 · Esc 關閉',
     'panel.title': '句子解析',
     'panel.closeTitle': '收起側欄',
-    'panel.emptyMsg': '點擊左側正文中的任意一句，<br>這裡會顯示句子結構拆解和詞彙講解。',
+    'panel.emptyMsg': '點擊正文中的任意一句，<br>這裡會顯示句子結構拆解和詞彙講解。',
     'panel.loading': '正在解析這句話…',
     'panel.retry': '重試',
     'panel.reanalyze': '重新解析這句話（跳過快取）',
@@ -2473,6 +2677,7 @@ const I18N = {
     'book.chapterFallback': '第 {n} 章',
     'errors.noKeyNetworkFail': '網路請求失敗。如果你不在 claude.ai 裡運行本工具，請在設定中填入你自己的 API key。如果你確實在 claude.ai 沙盒裡，請檢查網路連線後重試。',
     'errors.networkFail': '網路請求失敗：可能是斷網、被瀏覽器擴充功能攔截，或被 CORS 拒絕。如果是 CORS，可改用 Gemini（沒有此限制），或依 README 啟動 server.py / Cloudflare Worker 代理。',
+    'errors.timeout': '請求逾時：等待 3 分鐘後仍無回應，可能是模型太慢或服務商沒有回應。可以再點一次這句話重試，或在設定裡換一個更快的模型。',
     'errors.noKeyStatusFail': '請求失敗（狀態碼 {status}）{detail}。如果你不在 claude.ai 裡運行本工具，請在設定中填入你自己的 API key。',
     'errors.invalidKey': 'API key 被拒絕（狀態碼 401/403）{detail}。請檢查 key 是否填錯、是否已過期，以及它是否屬於目前選中的服務商——把 OpenAI 的 key 填進 Anthropic 一欄是最常見的原因。',
     'errors.rateLimited': '請求過於頻繁或已達用量上限（狀態碼 429）{detail}',
@@ -2605,6 +2810,7 @@ const I18N = {
     'book.chapterFallback': 'Chapter {n}',
     'errors.noKeyNetworkFail': 'Network request failed. If you are not running this tool inside claude.ai, enter your own API key in Settings. If you are inside the claude.ai sandbox, check your connection and retry.',
     'errors.networkFail': 'The request failed: no connection, a browser extension blocked it, or CORS refused it. If it is CORS, switch to Gemini (which has no such restriction) or run the server.py / Cloudflare Worker proxy described in the README.',
+    'errors.timeout': 'The request timed out after 3 minutes. The model may be very slow, or the provider stopped responding. Click the sentence again to retry, or choose a faster model in settings.',
     'errors.noKeyStatusFail': 'Request failed (status {status}){detail}. If you are not running this tool inside claude.ai, enter your own API key in Settings.',
     'errors.invalidKey': 'The API key was rejected (401/403){detail}. Check that it is correct, not expired, and belongs to the provider currently selected — pasting an OpenAI key into the Anthropic field is the usual cause.',
     'errors.rateLimited': 'Too many requests or usage limit reached (status 429){detail}',
@@ -2737,6 +2943,7 @@ const I18N = {
     'book.chapterFallback': 'Kapitel {n}',
     'errors.noKeyNetworkFail': 'Netzwerkanfrage fehlgeschlagen. Wenn du dieses Tool nicht in claude.ai nutzt, gib in den Einstellungen deinen eigenen API-Key ein. Falls du dich in der claude.ai-Sandbox befindest, prüfe deine Verbindung und versuche es erneut.',
     'errors.networkFail': 'Die Anfrage schlug fehl: keine Verbindung, von einer Browser-Erweiterung blockiert oder von CORS abgelehnt. Bei CORS können Sie zu Gemini wechseln (dort gibt es die Einschränkung nicht) oder den in der README beschriebenen Proxy (server.py / Cloudflare Worker) verwenden.',
+    'errors.timeout': 'Zeitüberschreitung nach 3 Minuten. Das Modell ist möglicherweise sehr langsam, oder der Anbieter antwortet nicht mehr. Klicken Sie den Satz erneut an, um es zu wiederholen, oder wählen Sie in den Einstellungen ein schnelleres Modell.',
     'errors.noKeyStatusFail': 'Anfrage fehlgeschlagen (Status {status}){detail}. Wenn du dieses Tool nicht in claude.ai nutzt, gib in den Einstellungen deinen eigenen API-Key ein.',
     'errors.invalidKey': 'Der API-Key wurde abgelehnt (401/403){detail}. Prüfen Sie, ob er korrekt und nicht abgelaufen ist und zum aktuell gewählten Anbieter gehört — ein OpenAI-Key im Anthropic-Feld ist die häufigste Ursache.',
     'errors.rateLimited': 'Zu viele Anfragen oder Nutzungslimit erreicht (Status 429){detail}',
@@ -2869,6 +3076,7 @@ const I18N = {
     'book.chapterFallback': 'Chapitre {n}',
     'errors.noKeyNetworkFail': 'Échec de la requête réseau. Si vous n\'utilisez pas cet outil dans claude.ai, saisissez votre propre clé API dans les paramètres. Si vous êtes bien dans le bac à sable claude.ai, vérifiez votre connexion et réessayez.',
     'errors.networkFail': 'Échec de la requête : pas de connexion, blocage par une extension du navigateur, ou refus CORS. En cas de CORS, passez à Gemini (sans cette restriction) ou lancez le proxy server.py / Cloudflare Worker décrit dans le README.',
+    'errors.timeout': 'Délai dépassé après 3 minutes. Le modèle est peut-être très lent, ou le fournisseur ne répond plus. Cliquez à nouveau sur la phrase pour réessayer, ou choisissez un modèle plus rapide dans les paramètres.',
     'errors.noKeyStatusFail': 'Échec de la requête (statut {status}){detail}. Si vous n\'utilisez pas cet outil dans claude.ai, saisissez votre propre clé API dans les paramètres.',
     'errors.invalidKey': 'La clé API a été refusée (401/403){detail}. Vérifiez qu’elle est correcte, non expirée et qu’elle correspond au fournisseur sélectionné — coller une clé OpenAI dans le champ Anthropic est la cause la plus fréquente.',
     'errors.rateLimited': 'Trop de requêtes ou quota atteint (statut 429){detail}',
@@ -3001,6 +3209,7 @@ const I18N = {
     'book.chapterFallback': 'Capítulo {n}',
     'errors.noKeyNetworkFail': 'Fallo en la solicitud de red. Si no estás usando esta herramienta dentro de claude.ai, introduce tu propia clave API en Configuración. Si sí estás en el sandbox de claude.ai, comprueba tu conexión e inténtalo de nuevo.',
     'errors.networkFail': 'La solicitud falló: sin conexión, bloqueada por una extensión del navegador o rechazada por CORS. Si es CORS, cambia a Gemini (que no tiene esa restricción) o usa el proxy server.py / Cloudflare Worker descrito en el README.',
+    'errors.timeout': 'Se agotó el tiempo de espera tras 3 minutos. El modelo puede ser muy lento o el proveedor dejó de responder. Vuelve a hacer clic en la frase para reintentar, o elige un modelo más rápido en los ajustes.',
     'errors.noKeyStatusFail': 'Solicitud fallida (estado {status}){detail}. Si no estás usando esta herramienta dentro de claude.ai, introduce tu propia clave API en Configuración.',
     'errors.invalidKey': 'La clave API fue rechazada (401/403){detail}. Comprueba que sea correcta, que no haya caducado y que corresponda al proveedor seleccionado: pegar una clave de OpenAI en el campo de Anthropic es la causa más común.',
     'errors.rateLimited': 'Demasiadas solicitudes o límite de uso alcanzado (estado 429){detail}',
@@ -3133,6 +3342,7 @@ const I18N = {
     'book.chapterFallback': 'Capitolo {n}',
     'errors.noKeyNetworkFail': 'Richiesta di rete non riuscita. Se non stai usando questo strumento dentro claude.ai, inserisci la tua API key nelle impostazioni. Se sei davvero nella sandbox di claude.ai, controlla la connessione e riprova.',
     'errors.networkFail': 'Richiesta non riuscita: nessuna connessione, bloccata da un’estensione del browser o rifiutata da CORS. Se è CORS, passa a Gemini (che non ha questa limitazione) oppure usa il proxy server.py / Cloudflare Worker descritto nel README.',
+    'errors.timeout': 'Tempo scaduto dopo 3 minuti. Il modello potrebbe essere molto lento oppure il fornitore non risponde più. Fai di nuovo clic sulla frase per riprovare, o scegli un modello più veloce nelle impostazioni.',
     'errors.noKeyStatusFail': 'Richiesta non riuscita (stato {status}){detail}. Se non stai usando questo strumento dentro claude.ai, inserisci la tua API key nelle impostazioni.',
     'errors.invalidKey': 'La chiave API è stata rifiutata (401/403){detail}. Verifica che sia corretta, non scaduta e che appartenga al provider selezionato: incollare una chiave OpenAI nel campo Anthropic è la causa più comune.',
     'errors.rateLimited': 'Troppe richieste o limite di utilizzo raggiunto (stato 429){detail}',
@@ -3265,6 +3475,7 @@ const I18N = {
     'book.chapterFallback': 'Глава {n}',
     'errors.noKeyNetworkFail': 'Сетевой запрос не удался. Если вы используете инструмент не внутри claude.ai, введите свой API-ключ в настройках. Если вы всё же в песочнице claude.ai, проверьте соединение и повторите попытку.',
     'errors.networkFail': 'Запрос не удался: нет соединения, его заблокировало расширение браузера или отклонил CORS. Если дело в CORS, переключитесь на Gemini (там такого ограничения нет) или запустите прокси server.py / Cloudflare Worker, описанный в README.',
+    'errors.timeout': 'Время ожидания истекло через 3 минуты. Модель может быть очень медленной, или провайдер перестал отвечать. Нажмите на предложение ещё раз, чтобы повторить попытку, или выберите более быструю модель в настройках.',
     'errors.noKeyStatusFail': 'Запрос не удался (статус {status}){detail}. Если вы используете инструмент не внутри claude.ai, введите свой API-ключ в настройках.',
     'errors.invalidKey': 'Ключ API отклонён (401/403){detail}. Проверьте, что он верен, не истёк и относится к выбранному провайдеру — ключ OpenAI в поле Anthropic самая частая причина.',
     'errors.rateLimited': 'Слишком много запросов или исчерпан лимит использования (статус 429){detail}',
@@ -3378,7 +3589,7 @@ const I18N = {
     'toolbar.hint': '文をクリックすると文法・語彙解析を表示 · ← → でページ送り · Esc で閉じる',
     'panel.title': '文の解析',
     'panel.closeTitle': 'パネルを閉じる',
-    'panel.emptyMsg': '左側の本文の文をクリックすると、<br>ここに文構造と語彙の解説が表示されます。',
+    'panel.emptyMsg': '本文の文をクリックすると、<br>ここに文構造と語彙の解説が表示されます。',
     'panel.loading': 'この文を解析しています…',
     'panel.retry': '再試行',
     'panel.reanalyze': 'この文を解析し直す（キャッシュを使わない）',
@@ -3397,6 +3608,7 @@ const I18N = {
     'book.chapterFallback': '第{n}章',
     'errors.noKeyNetworkFail': 'ネットワークリクエストに失敗しました。claude.ai 上でこのツールを使用していない場合は、設定で自分の API キーを入力してください。claude.ai のサンドボックス内であれば、接続を確認して再試行してください。',
     'errors.networkFail': 'リクエストに失敗しました：接続がない、ブラウザ拡張機能による遮断、または CORS による拒否です。CORS の場合は Gemini（この制限がありません）に切り替えるか、README の server.py / Cloudflare Worker プロキシをご利用ください。',
+    'errors.timeout': 'リクエストがタイムアウトしました（3 分待っても応答がありません）。モデルが非常に遅いか、プロバイダーが応答していない可能性があります。もう一度文をクリックして再試行するか、設定でより高速なモデルを選んでください。',
     'errors.noKeyStatusFail': 'リクエストに失敗しました（ステータス {status}）{detail}。claude.ai 上でこのツールを使用していない場合は、設定で自分の API キーを入力してください。',
     'errors.invalidKey': 'API キーが拒否されました（401/403）{detail}。キーが正しいか、有効期限が切れていないか、そして現在選択中のプロバイダーのものかを確認してください。OpenAI のキーを Anthropic 欄に貼るのが最も多い原因です。',
     'errors.rateLimited': 'リクエストが多すぎるか、利用上限に達しました（ステータス 429）{detail}',
@@ -3713,11 +3925,103 @@ async function extractPdfLines(page) {
   // sitting in the top or bottom ~9% of the page
   const topBand = pageHeight * 0.91;
   const bottomBand = pageHeight * 0.09;
-  return lines.filter(l => {
-    const nearEdge = l.y > topBand || l.y < bottomBand;
+  const inEdgeBand = (l) => l.y > topBand || l.y < bottomBand;
+  const kept = lines.filter(l => {
     const looksLikeFolio = l.text.length <= 12 && !/[a-zà-öø-ÿ]/.test(l.text);
-    return !(nearEdge && looksLikeFolio);
+    return !(inEdgeBand(l) && looksLikeFolio);
   });
+  // Everything sitting in the running-header / folio bands, whether or not the
+  // filter above dropped it. Chaptering reads this: a running header whose
+  // text changes marks a section boundary (see runningHeaderMarks). Attached
+  // as a property rather than returned separately so the signature stays "an
+  // array of lines" -- JSON.stringify ignores non-index properties, which is
+  // what the layout tests compare on.
+  // Deliberately a wider band than the folio filter above. Satow's diary sets
+  // its year line at 91.0% of page height while that threshold is 91.02%, so
+  // the one token carrying the book's structure missed the band by a fraction
+  // of a point. Being generous here is safe because runningHeaderMarks only
+  // trusts tokens that repeat across consecutive pages: body text swept up by
+  // the wider band differs page to page and drops out on its own.
+  const headerBandTop = pageHeight * 0.86;
+  const headerBandBottom = pageHeight * 0.14;
+  kept.edgeLines = lines
+    .filter(l => l.y > headerBandTop || l.y < headerBandBottom)
+    .map(l => l.text);
+  return kept;
+}
+
+// A running header that changes its text marks a section boundary.
+//
+// This is the only structural signal some books have. Satow's diary carries
+// the year (1904/1905/1906) in the header band; the Deutschmeister anthology
+// puts "Author: Title" there, one per article. Neither has a PDF outline, and
+// -- measured across the whole book, not a sample -- both set their body text
+// in a single size throughout, so there is no font-size jump and no centred
+// heading to find. Every larger run in Satow turned out to be front or back
+// matter (title page, photo captions, bibliography), so splitting on size
+// would manufacture junk chapters rather than find real ones.
+//
+// Folios have to be ignored or every page becomes its own section. A page
+// number changes on every page; a year survives for hundreds. Requiring a
+// token to hold for at least this many consecutive pages separates the two.
+const MIN_HEADER_RUN = 5;
+
+// Sections shorter than this are noise, not structure -- if the "header"
+// changes every couple of pages it is a folio or a caption, not a section
+// title, and acting on it shreds the book.
+const MIN_PAGES_PER_HEADER_SECTION = 4;
+
+function runningHeaderMarks(pageHeaders) {
+  // pageHeaders: [{ pageIndex, tokens: [string] }] in page order
+  //
+  // Stability has to be decided per page, not per token. Marking a token
+  // "stable everywhere" because it managed one long run somewhere lets a
+  // stray "1" that appears on scattered pages join the signature on each of
+  // them, and the signature then flips between {1904} and {1, 1904} back and
+  // forth -- which reads as a section boundary every time it flips. Satow
+  // came out as 69 alternating "1"/"1904" chapters that way.
+  const stableAt = pageHeaders.map(() => new Set());
+  const positionsOf = new Map();
+  pageHeaders.forEach(({ tokens }, i) => {
+    for (const t of new Set(tokens)) {
+      if (!positionsOf.has(t)) positionsOf.set(t, []);
+      positionsOf.get(t).push(i);
+    }
+  });
+  for (const [token, positions] of positionsOf) {
+    let runStart = 0;
+    for (let k = 1; k <= positions.length; k++) {
+      const broken = k === positions.length || positions[k] !== positions[k - 1] + 1;
+      if (!broken) continue;
+      if (k - runStart >= MIN_HEADER_RUN) {
+        for (let j = runStart; j < k; j++) stableAt[positions[j]].add(token);
+      }
+      runStart = k;
+    }
+  }
+
+  const marks = [];
+  let prevSignature = null;
+  pageHeaders.forEach(({ pageIndex, tokens }, i) => {
+    const sig = [...stableAt[i]].sort();
+    if (!sig.length) return;
+    const key = sig.join('|');
+    if (prevSignature === null) { prevSignature = key; return; }
+    if (key === prevSignature) return;
+    // Title the section by what actually changed -- the constant part of the
+    // header (a book title repeated on every page) says nothing about which
+    // section this is.
+    const prevSet = new Set(prevSignature.split('|'));
+    const changed = sig.filter(t => !prevSet.has(t));
+    marks.push({ pageIndex, title: joinOutlineTitles(changed.length ? changed : sig) });
+    prevSignature = key;
+  });
+
+  // A header that changes every page or two is not chaptering the book.
+  const lastPage = pageHeaders.length ? pageHeaders[pageHeaders.length - 1].pageIndex : 0;
+  const span = Math.max(1, lastPage - (marks.length ? marks[0].pageIndex : 0));
+  if (marks.length && span / marks.length < MIN_PAGES_PER_HEADER_SECTION) return [];
+  return marks;
 }
 
 // Shared core: walks every page once, producing paragraphs AND which
@@ -3740,8 +4044,14 @@ async function extractPdfParagraphsWithPages(pdf) {
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const lines = await extractPdfLines(page);
-    if (lines.length) pageLines.push({ page: p, lines });
+    if (lines.length) pageLines.push({ page: p, lines, edgeLines: lines.edgeLines || [] });
   }
+  // Kept alongside the paragraphs so a caller with no PDF outline can still
+  // find sections (runningHeaderMarks).
+  const pageHeaders = pageLines.map(({ page, edgeLines }) => ({
+    pageIndex: page - 1, // 0-based, matching pdf.js's own convention
+    tokens: edgeLines,
+  }));
 
   // Body-margin mode, computed separately for odd and even pages. Properly
   // bound books commonly mirror their margins page to page to leave room for
@@ -3848,7 +4158,7 @@ async function extractPdfParagraphsWithPages(pdf) {
     }
   }
   flush();
-  return { paragraphs, pageOfParagraph };
+  return { paragraphs, pageOfParagraph, pageHeaders };
 }
 
 async function extractPdfText(arrayBuffer) {
@@ -3889,6 +4199,34 @@ async function flattenPdfOutline(pdf, items, out) {
 // author's own actual chapter structure rather than a guess. Returns null
 // (letting the caller fall back to the flat-text heuristic path) when no
 // usable outline exists.
+// Builds one chapter title out of the outline entries that share a page.
+// Kept deliberately conservative: a page carrying many outline entries is a
+// contents page or a dense subsection list, and gluing all of them together
+// would produce a title longer than the paragraph it labels.
+const OUTLINE_TITLE_MAX_PARTS = 2;
+const OUTLINE_TITLE_MAX_CHARS = 120;
+
+function joinOutlineTitles(parts) {
+  const seen = [];
+  for (const raw of parts) {
+    const title = (raw || '').trim();
+    if (!title) continue;
+    // "Vorwort" nested under "Vorwort", or a child repeating its parent
+    // verbatim, should not become "Vorwort: Vorwort"
+    if (seen.some(t => t === title || t.includes(title) || title.includes(t))) continue;
+    seen.push(title);
+    if (seen.length >= OUTLINE_TITLE_MAX_PARTS) break;
+  }
+  const joined = seen.join(': ');
+  // Truncate the merged title rather than falling back to the outer one
+  // alone: for the anthology case the outer entry is the author name, so
+  // dropping the rest would reinstate the very problem this merge fixes. A
+  // clipped "Author: Article tit…" still says which article it is.
+  return joined.length > OUTLINE_TITLE_MAX_CHARS
+    ? joined.slice(0, OUTLINE_TITLE_MAX_CHARS - 1).trimEnd() + '…'
+    : joined;
+}
+
 async function extractPdfChapters(arrayBuffer) {
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   pdfLastPageCount = pdf.numPages;
@@ -3910,18 +4248,44 @@ async function extractPdfChapters(arrayBuffer) {
   const usable = flatOutline
     .filter(o => Number.isInteger(o.pageIndex))
     .sort((a, b) => a.pageIndex - b.pageIndex);
-  // collapse entries that resolve to the same page (nested subsections
-  // landing on their parent's first page) down to just the first/outer one --
-  // paragraph-level granularity can't place them any more precisely anyway
+  // Entries resolving to the same page have to become one chapter, because
+  // paragraph-level granularity can't place them any more precisely. Their
+  // titles are *merged* rather than all-but-the-first discarded: in a nested
+  // outline the outer entry is frequently a label for the inner one rather
+  // than a section of its own, and dropping the inner one throws away the
+  // part that actually identifies the chapter. An anthology whose outline is
+  //     "Bernhard Demel"  ->  "Der Deutsche Orden und das Regiment ..."
+  // (author on one level, article title on the next, both on page 12) has to
+  // come out as "Bernhard Demel: Der Deutsche Orden ...", not as the bare
+  // author name. flattenPdfOutline walks depth-first and the sort below is
+  // stable, so entries arrive outermost-first and read in that order.
   const marks = [];
   for (const o of usable) {
-    if (marks.length && marks[marks.length - 1].pageIndex === o.pageIndex) continue;
-    marks.push(o);
+    const prev = marks.length ? marks[marks.length - 1] : null;
+    if (prev && prev.pageIndex === o.pageIndex) {
+      prev.titleParts.push(o.title);
+      continue;
+    }
+    marks.push({ pageIndex: o.pageIndex, titleParts: [o.title] });
   }
-  if (marks.length < 2) return null; // not enough structure to be worth using
+  marks.forEach(m => { m.title = joinOutlineTitles(m.titleParts); });
 
-  const { paragraphs, pageOfParagraph } = await extractPdfParagraphsWithPages(pdf);
+  const { paragraphs, pageOfParagraph, pageHeaders } = await extractPdfParagraphsWithPages(pdf);
   if (!paragraphs.length) throw new Error(t('import.noText'));
+
+  // No usable outline: fall back to the running header. Books without
+  // bookmarks are exactly the ones the shape-based heading heuristic does
+  // worst on, and a header that changes text is a far more reliable boundary
+  // than guessing from paragraph shape.
+  if (marks.length < 2) {
+    const headerMarks = runningHeaderMarks(pageHeaders || []);
+    if (headerMarks.length < 1) return null; // nothing to go on; caller falls back
+    marks.length = 0;
+    marks.push(...headerMarks);
+    // The header only tells us where sections *change*, so the run before the
+    // first change is a section too and would otherwise be dropped.
+    if (marks[0].pageIndex > 0) marks.unshift({ pageIndex: 0, title: '' });
+  }
 
   const chapters = [];
   for (let m = 0; m < marks.length; m++) {
@@ -4720,6 +5084,10 @@ function renderPage(pageIndex) {
 let resizeRerenderTimer = null;
 function wireResizeRerender() {
   window.addEventListener('resize', () => {
+    // Title refitting is deliberately NOT done here. A resize fires a burst of
+    // events, and measuring inside one reads a width the layout hasn't caught
+    // up with yet -- which shrank titles to the floor and left them there.
+    // observeTitleFit()'s ResizeObserver reports a settled width instead.
     if (settings.paginationMode !== 'fit-height') return;
     clearTimeout(resizeRerenderTimer);
     resizeRerenderTimer = setTimeout(() => {
@@ -4767,9 +5135,7 @@ async function saveProgress() {
       await window.storage.set(key, payload);
     }
   } catch (e) { /* artifact storage may be unavailable outside claude.ai */ }
-  try {
-    localStorage.setItem(key, payload);
-  } catch (e) { /* ignore */ }
+  safeStorageWrite(() => localStorage.setItem(key, payload));
 }
 
 async function loadProgress() {
@@ -4836,6 +5202,89 @@ function switchChapter(index) {
   hideToc();
 }
 
+// The three header fields are <input>s, so their text cannot wrap: a long
+// "Author · Title" is simply cut off at the right edge, which on a phone is
+// most of it. Shrinking the type per breakpoint doesn't fix this -- a title
+// long enough will overflow any fixed size -- so instead the size is reduced
+// until it actually fits, with a floor so it never becomes unreadable.
+// scrollWidth is not usable here: on an <input> the engines clamp it to
+// clientWidth when the field isn't focused, so an overflowing title reports as
+// fitting and the size is never reduced. Measuring the string in a mirror
+// span, with the same typography, is what actually answers "how wide is this
+// text at this size".
+let titleProbe = null;
+function titleTextWidth(el, sizePx) {
+  if (!titleProbe) {
+    titleProbe = document.createElement('span');
+    titleProbe.setAttribute('aria-hidden', 'true');
+    titleProbe.style.cssText =
+      'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:pre;';
+    document.body.appendChild(titleProbe);
+  }
+  const cs = getComputedStyle(el);
+  const baseSize = parseFloat(cs.fontSize) || sizePx;
+  // letter-spacing is reported in px against the *current* size, so it has to
+  // be rescaled or a tracked-out title (the book line is 0.12em) mismeasures.
+  const spacing = parseFloat(cs.letterSpacing);
+  titleProbe.style.fontFamily = cs.fontFamily;
+  titleProbe.style.fontWeight = cs.fontWeight;
+  titleProbe.style.fontStyle = cs.fontStyle;
+  titleProbe.style.textTransform = cs.textTransform;
+  titleProbe.style.fontSize = sizePx + 'px';
+  titleProbe.style.letterSpacing =
+    Number.isFinite(spacing) ? (spacing * sizePx / baseSize) + 'px' : 'normal';
+  titleProbe.textContent = el.value || '';
+  return titleProbe.getBoundingClientRect().width;
+}
+
+function fitTitleField(el) {
+  if (!el || el.classList.contains('hidden')) return;
+  // Clearing first makes the starting point whatever the current CSS says, so
+  // this stays correct across the media-query breakpoints rather than baking
+  // in whichever size happened to apply the first time it ran.
+  el.style.fontSize = '';
+  const avail = el.clientWidth;
+  if (!avail) return; // not laid out yet (display:none ancestor)
+  const max = parseFloat(getComputedStyle(el).fontSize);
+  if (!max) return;
+  const min = Math.max(10, max * 0.55);
+  let size = max;
+  while (size > min && titleTextWidth(el, size) > avail) size -= 0.5;
+  if (size < max) el.style.fontSize = size + 'px';
+}
+
+function fitTitleFields() {
+  ['book-title-field', 'chapter-title-field', 'chapter-dates-field']
+    .forEach(id => fitTitleField(document.getElementById(id)));
+}
+
+// Fitting once at load is not enough: the reader area also changes width when
+// the panel is collapsed or reopened (which init does on phones, right after
+// the first fit) and when the TOC drawer moves. Measuring at the wrong moment
+// shrank a short date line to the 10px floor and left it there.
+let lastTitleFitWidth = 0;
+function observeTitleFit() {
+  // The very first measurement is the one most likely to be wrong: it can run
+  // before the final layout or before the font metrics are settled, and a
+  // too-early measurement shrinks a title that would have fit and then leaves
+  // it there. Re-fit once after paint, and again once fonts report ready.
+  requestAnimationFrame(() => fitTitleFields());
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => fitTitleFields()).catch(() => {});
+  }
+
+  const box = document.querySelector('.reader-inner');
+  if (!box || typeof ResizeObserver === 'undefined') return;
+  new ResizeObserver((entries) => {
+    // Width only. Refitting changes the type size, which changes this box's
+    // height, which would otherwise re-trigger the observer forever.
+    const w = Math.round(entries[0].contentRect.width);
+    if (w === lastTitleFitWidth) return;
+    lastTitleFitWidth = w;
+    fitTitleFields();
+  }).observe(box);
+}
+
 function syncTitleFieldsFromState() {
   const bookEl = document.getElementById('book-title-field');
   const chapterEl = document.getElementById('chapter-title-field');
@@ -4850,6 +5299,7 @@ function syncTitleFieldsFromState() {
   const hasDates = !!chapterDates;
   if (datesEl) datesEl.classList.toggle('hidden', !hasDates);
   if (addBtn) addBtn.classList.toggle('hidden', hasDates);
+  fitTitleFields();
 }
 
 function populateChapterSelect() {
@@ -5067,7 +5517,14 @@ async function onSentenceClick(span, sentenceText) {
     if (activeSpan === span) renderResult(result, sentenceText);
   } catch (err) {
     const errResult = { error: (err && err.message) || String(err) };
-    cache.set(cacheKey, errResult);
+    // A timeout or dropped connection says nothing about this sentence, so
+    // caching it would make one bad moment look permanent: the reader would
+    // come back later, see the stale error again, and have to find the retry
+    // button. Configuration errors (bad key, bad request) do get cached --
+    // they'll reproduce anyway, and re-asking just burns quota.
+    if (!(err && err.transient)) {
+      cache.set(cacheKey, errResult);
+    }
     if (activeSpan === span) renderResult(errResult, sentenceText);
   }
 }
@@ -5119,14 +5576,20 @@ function renderResult(result, sentenceText) {
   const followUps = (result.history || []).slice(2);
 
   body.innerHTML = `
-    <div class="section-tabs">
-      <button class="tab-btn active" data-tab="grammar">${t('panel.tabGrammar')}</button>
-      <button class="tab-btn" data-tab="vocab">${t('panel.tabVocab')}</button>
+    <div class="section-tabs" role="tablist" aria-label="${escapeHtml(t('panel.title'))}">
+      <button class="tab-btn active" data-tab="grammar" role="tab"
+              id="tab-grammar" aria-controls="tabpanel-grammar"
+              aria-selected="true" tabindex="0">${t('panel.tabGrammar')}</button>
+      <button class="tab-btn" data-tab="vocab" role="tab"
+              id="tab-vocab" aria-controls="tabpanel-vocab"
+              aria-selected="false" tabindex="-1">${t('panel.tabVocab')}</button>
       <button class="reanalyze-btn" id="reanalyze-btn" title="${escapeHtml(t('panel.reanalyze'))}"
               aria-label="${escapeHtml(t('panel.reanalyze'))}">⟳</button>
     </div>
-    <div class="tab-panel active" data-tab="grammar"><div class="analysis-md">${result.grammarHtml}</div></div>
-    <div class="tab-panel" data-tab="vocab"><div class="analysis-md">${result.vocabHtml}</div></div>
+    <div class="tab-panel active" data-tab="grammar" role="tabpanel"
+         id="tabpanel-grammar" aria-labelledby="tab-grammar"><div class="analysis-md">${result.grammarHtml}</div></div>
+    <div class="tab-panel" data-tab="vocab" role="tabpanel"
+         id="tabpanel-vocab" aria-labelledby="tab-vocab"><div class="analysis-md">${result.vocabHtml}</div></div>
     <div class="chat-section">
       <div class="chat-thread" id="chat-thread">${renderChatTurns(followUps)}</div>
       <div class="chat-input-row">
@@ -5135,12 +5598,38 @@ function renderResult(result, sentenceText) {
       </div>
     </div>
   `;
-  body.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      body.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      body.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      btn.classList.add('active');
-      body.querySelector(`.tab-panel[data-tab="${btn.dataset.tab}"]`).classList.add('active');
+  const tabs = [...body.querySelectorAll('.tab-btn')];
+
+  // Roving tabindex: the tablist is one Tab stop and the arrow keys move
+  // between tabs inside it, which is what a screen-reader user expects of
+  // role="tablist" -- and what makes Tab still reach the chat box in one press
+  // instead of two.
+  function selectTab(btn, { focus = false } = {}) {
+    tabs.forEach(b => {
+      const on = b === btn;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+      b.tabIndex = on ? 0 : -1;
+    });
+    body.querySelectorAll('.tab-panel').forEach(p => {
+      p.classList.toggle('active', p.dataset.tab === btn.dataset.tab);
+    });
+    if (focus) btn.focus();
+  }
+
+  tabs.forEach((btn, i) => {
+    btn.addEventListener('click', () => selectTab(btn));
+    btn.addEventListener('keydown', (e) => {
+      const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (step) {
+        e.preventDefault();
+        selectTab(tabs[(i + step + tabs.length) % tabs.length], { focus: true });
+        return;
+      }
+      if (e.key === 'Home' || e.key === 'End') {
+        e.preventDefault();
+        selectTab(e.key === 'Home' ? tabs[0] : tabs[tabs.length - 1], { focus: true });
+      }
     });
   });
 
@@ -5374,8 +5863,9 @@ ${transLabel}〈这里填这句话完整、通顺、自然的整句翻译〉
 ## ${terms.vocab}
 - 列出这句话里较生僻、较书面、或带有特殊语境色彩的词汇或短语（不用列出简单常见词）。
 - 极其重要：词条只能从【用户要求分析的这一句话本身】中挑选，禁止选取仅出现在你收到的上下文段落、但没有出现在这句话原文里的词/短语——上下文段落只是用来帮你理解代词指代和前后文关系的背景资料，不是分析对象。如果不确定某个词是否真的出现在目标句子里，就不要列出它。
-- 每个词条格式：*原词* — 释义，并按词性附加以下信息（不适用的项跳过，不要生造不存在的变化形式）：
-  - 名词：标出语法性/词性（如德语的 der/die/das，法语、俄语等语言的阳性/阴性/中性等，视该语言实际语法特点而定；分析中文、英文等没有语法性的语言则跳过这一项），以及复数形式。
+- 每个词条格式：*原词* — 释义，然后**只**按这个词自己的词性附加下面对应的一条信息。
+  - 每个词条只属于一个词性。不属于的那些类别**整条略去、一个字都不要写**，禁止出现「动词：不适用」「无比较级」「N/A」「—」这类占位说明，也不要生造不存在的变化形式。
+  - 名词：给出该语言的语法性，并且**只写这个词实际的那一个定冠词**。德语的定冠词是 der、die、das 三者之一，必须三选一：Erdbeben 是中性，就只写 das，写成「der/das」或列出多个是错的。（法语、俄语等按该语言的阳性/阴性/中性体例；中文、英文等没有语法性的语言，这一项整条略去。）此外给出复数形式。
   - 动词：标出该语言里对识别这个词有帮助的核心变位形式（例如德语给出第三人称单数现在时、过去式 Präteritum、过去分词 Partizip II 三种形式；其他语言按该语言惯例给出对应的原形/变位提示）。
   - 形容词等其他词性：如有值得注意的变格/比较级等形式也可以简要补充，没有就不提。
 - 如果句子里夹杂其他语言的词汇，也一并标注并解释。
@@ -5433,9 +5923,14 @@ function buildProviderRequest(provider, ps, systemPrompt, messages) {
   if (provider === 'gemini') {
     const baseUrl = (ps.baseUrl || PROVIDER_DEFAULTS.gemini.baseUrl).replace(/\/+$/, '');
     const model = ps.model || PROVIDER_DEFAULTS.gemini.model;
+    // The key goes in a header, not the query string: URLs end up in browser
+    // history, proxy logs and Referer headers, and a key that leaks there
+    // leaks silently.
+    const headers = { 'Content-Type': 'application/json' };
+    if (ps.apiKey) headers['x-goog-api-key'] = ps.apiKey;
     return {
-      url: `${baseUrl}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(ps.apiKey)}`,
-      headers: { 'Content-Type': 'application/json' },
+      url: `${baseUrl}/models/${encodeURIComponent(model)}:generateContent`,
+      headers,
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: systemPrompt }] },
         // Gemini calls the AI turn "model", not "assistant"
@@ -5479,44 +5974,76 @@ function extractProviderText(provider, data) {
   return textBlocks.join('\n');
 }
 
+// Matches server.py's own --timeout default. Deliberately generous: some
+// providers and reasoning-heavy models really do take minutes on a long
+// sentence, and cutting off a slow-but-working answer is worse than waiting.
+const REQUEST_TIMEOUT_MS = 180000;
+
+// Marks a failure as "worth trying again" -- a timeout, a dropped connection,
+// a 5xx. onSentenceClick keeps these out of the analysis cache so one bad
+// moment doesn't stick to a sentence until the reader notices the retry button.
+function transientError(message) {
+  const err = new Error(message);
+  err.transient = true;
+  return err;
+}
+
 async function callProvider(systemPrompt, messages) {
   const provider = settings.provider || 'anthropic';
-  const ps = currentProviderSettings();
+  const ps = effectiveProviderSettings(provider);
   const hasKey = !!ps.apiKey;
 
   // Only Anthropic has a keyless fallback (the claude.ai sandbox proxy).
-  // OpenAI/Gemini calls always need a user-supplied key.
-  if (!hasKey && provider !== 'anthropic') {
+  // OpenAI/Gemini otherwise need a key -- unless the Base URL points at a
+  // proxy, which typically supplies the key itself.
+  if (!hasKey && provider !== 'anthropic' && !isProxiedProvider(provider, ps)) {
     throw new Error(t('errors.providerKeyRequired', { provider: PROVIDER_LABELS[provider] || provider }));
   }
 
   const req = buildProviderRequest(provider, ps, systemPrompt, messages);
 
+  // A provider that accepts the connection and then never answers would
+  // otherwise leave the panel spinning forever. Purely time-driven on purpose:
+  // clicking another sentence must NOT abort this request. It is allowed to
+  // finish and populate the cache (see onSentenceClick), so coming back to
+  // this sentence is instant instead of paying for the analysis twice.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
   let response;
   try {
-    response = await fetch(req.url, { method: 'POST', headers: req.headers, body: req.body });
+    response = await fetch(req.url, {
+      method: 'POST', headers: req.headers, body: req.body, signal: controller.signal,
+    });
   } catch (networkErr) {
     // fetch() itself throws (rather than resolving with a bad status) on
     // network failures, including CORS preflight rejections
-    if (!hasKey) throw new Error(t('errors.noKeyNetworkFail'));
-    throw new Error(t('errors.networkFail'));
+    if (networkErr && networkErr.name === 'AbortError') throw transientError(t('errors.timeout'));
+    if (!hasKey) throw transientError(t('errors.noKeyNetworkFail'));
+    throw transientError(t('errors.networkFail'));
+  } finally {
+    clearTimeout(timer);
   }
 
   if (!response.ok) {
     let detail = '';
     try {
       const errJson = await response.json();
-      detail = errJson && errJson.error && errJson.error.message ? `：${errJson.error.message}` : '';
+      detail = errJson && errJson.error && errJson.error.message ? `: ${errJson.error.message}` : '';
     } catch (e) { /* body may not be JSON */ }
-    if (!hasKey) throw new Error(t('errors.noKeyStatusFail', { status: response.status, detail }));
-    if (response.status === 401 || response.status === 403) throw new Error(t('errors.invalidKey', { detail }));
-    if (response.status === 429) throw new Error(t('errors.rateLimited', { detail }));
-    throw new Error(t('errors.apiFailed', { status: response.status, detail }));
+    // 5xx and 429 are worth retrying; a rejected key or a bad request is not,
+    // so only the former are marked transient (and thus kept out of the cache).
+    const retryable = response.status === 429 || response.status >= 500;
+    const fail = (msg) => { throw retryable ? transientError(msg) : new Error(msg); };
+    if (!hasKey) fail(t('errors.noKeyStatusFail', { status: response.status, detail }));
+    if (response.status === 401 || response.status === 403) fail(t('errors.invalidKey', { detail }));
+    if (response.status === 429) fail(t('errors.rateLimited', { detail }));
+    fail(t('errors.apiFailed', { status: response.status, detail }));
   }
 
   const data = await response.json();
   const fullText = extractProviderText(provider, data);
-  if (!fullText || !fullText.trim()) throw new Error(t('errors.emptyResponse'));
+  if (!fullText || !fullText.trim()) throw transientError(t('errors.emptyResponse'));
   return fullText;
 }
 
@@ -5711,6 +6238,73 @@ function syncProviderFieldsVisibility() {
   });
 }
 
+// The chip rows are radio groups in everything but markup: exactly one choice,
+// mutually exclusive. As bare <div>s they were unreachable by keyboard and
+// silent to a screen reader. Roles and arrow-key handling are added here, in
+// one place, instead of five copies of the same click wiring.
+//
+// Selection state still lives in the .selected class, because several other
+// code paths set it directly; syncRadioGroupAria derives the ARIA state from
+// that class so the two cannot drift apart.
+function syncRadioGroupAria(container) {
+  const chips = [...container.querySelectorAll('.radio-chip')];
+  const selected = chips.find(c => c.classList.contains('selected'));
+  chips.forEach(chip => {
+    const on = chip === selected;
+    chip.setAttribute('aria-checked', on ? 'true' : 'false');
+    // Roving tabindex: one Tab stop per group, arrows move inside it. The
+    // fallback keeps a group with nothing selected reachable at all.
+    chip.tabIndex = (on || (!selected && chip === chips[0])) ? 0 : -1;
+  });
+}
+
+function syncAllRadioGroupAria() {
+  document.querySelectorAll('.radio-row').forEach(syncRadioGroupAria);
+}
+
+function wireRadioGroup(containerId, onSelect) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.setAttribute('role', 'radiogroup');
+
+  // Point at the live <label> element rather than copying its text, so the
+  // accessible name follows a UI-language switch instead of going stale.
+  const label = container.parentElement && container.parentElement.querySelector('label');
+  if (label) {
+    if (!label.id) label.id = containerId + '-label';
+    container.setAttribute('aria-labelledby', label.id);
+  }
+
+  const chips = [...container.querySelectorAll('.radio-chip')];
+
+  function select(chip, { focus = false } = {}) {
+    chips.forEach(c => c.classList.toggle('selected', c === chip));
+    syncRadioGroupAria(container);
+    if (focus) chip.focus();
+    if (onSelect) onSelect(chip);
+  }
+
+  chips.forEach((chip, i) => {
+    chip.setAttribute('role', 'radio');
+    chip.addEventListener('click', () => select(chip));
+    chip.addEventListener('keydown', (e) => {
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        select(chip);
+        return;
+      }
+      const step = (e.key === 'ArrowRight' || e.key === 'ArrowDown') ? 1
+        : (e.key === 'ArrowLeft' || e.key === 'ArrowUp') ? -1 : 0;
+      if (!step) return;
+      // Arrow keys in a radio group move *and* select, which is the standard
+      // behaviour and what makes the group usable without a pointer.
+      e.preventDefault();
+      select(chips[(i + step + chips.length) % chips.length], { focus: true });
+    });
+  });
+  syncRadioGroupAria(container);
+}
+
 function syncSettingsFormFromState() {
   document.querySelectorAll('#provider-chips .radio-chip').forEach(chip => {
     chip.classList.toggle('selected', chip.dataset.provider === settings.provider);
@@ -5750,6 +6344,10 @@ function syncSettingsFormFromState() {
   document.getElementById('font-family-select').value = settings.fontFamily || 'serif';
   document.getElementById('font-size-input').value = settings.fontSize || 19;
   document.getElementById('font-size-value').textContent = (settings.fontSize || 19) + 'px';
+
+  // Every block above sets .selected directly, so re-derive the ARIA state
+  // from it once here rather than at each site.
+  syncAllRadioGroupAria();
 
   populateChapterSelect();
   renderDocLibraryList();
@@ -5822,42 +6420,20 @@ function wireSettingsModal() {
   });
   wireSettingsTabs();
 
-  document.querySelectorAll('#provider-chips .radio-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('#provider-chips .radio-chip').forEach(c => c.classList.remove('selected'));
-      chip.classList.add('selected');
-      settings.provider = chip.dataset.provider;
-      syncProviderFieldsVisibility();
-    });
+  wireRadioGroup('provider-chips', (chip) => {
+    settings.provider = chip.dataset.provider;
+    syncProviderFieldsVisibility();
   });
-  document.querySelectorAll('#lang-rule-chips .radio-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('#lang-rule-chips .radio-chip').forEach(c => c.classList.remove('selected'));
-      chip.classList.add('selected');
-    });
+  wireRadioGroup('lang-rule-chips');
+  wireRadioGroup('output-lang-chips', (chip) => {
+    document.getElementById('output-lang-custom-input').style.display =
+      chip.dataset.outlang === 'custom' ? 'block' : 'none';
   });
-  document.querySelectorAll('#output-lang-chips .radio-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('#output-lang-chips .radio-chip').forEach(c => c.classList.remove('selected'));
-      chip.classList.add('selected');
-      document.getElementById('output-lang-custom-input').style.display =
-        chip.dataset.outlang === 'custom' ? 'block' : 'none';
-    });
+  wireRadioGroup('pagination-mode-chips', (chip) => {
+    document.getElementById('paras-per-page-wrap').style.display =
+      chip.dataset.mode === 'none' ? 'none' : 'block';
   });
-  document.querySelectorAll('#pagination-mode-chips .radio-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('#pagination-mode-chips .radio-chip').forEach(c => c.classList.remove('selected'));
-      chip.classList.add('selected');
-      document.getElementById('paras-per-page-wrap').style.display =
-        chip.dataset.mode === 'none' ? 'none' : 'block';
-    });
-  });
-  document.querySelectorAll('#theme-chips .radio-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('#theme-chips .radio-chip').forEach(c => c.classList.remove('selected'));
-      chip.classList.add('selected');
-    });
-  });
+  wireRadioGroup('theme-chips');
   document.getElementById('font-size-input').addEventListener('input', (e) => {
     document.getElementById('font-size-value').textContent = e.target.value + 'px';
   });
@@ -6000,11 +6576,18 @@ function wireTitleFields() {
     saveTextToLocalStorage();
   });
 
+  // 'change' only fires on blur, so without this a title being typed would
+  // run past the edge until the reader clicked away.
+  [bookEl, chapterEl, datesEl].forEach(el => {
+    el.addEventListener('input', () => fitTitleField(el));
+  });
+
   const addDatesBtn = document.getElementById('btn-add-dates');
   if (addDatesBtn) {
     addDatesBtn.addEventListener('click', () => {
       datesEl.classList.remove('hidden');
       addDatesBtn.classList.add('hidden');
+      fitTitleField(datesEl); // only measurable now that it isn't display:none
       datesEl.focus();
     });
   }
@@ -6018,6 +6601,7 @@ document.getElementById('btn-toggle-panel').addEventListener('click', togglePane
 
 (async function init() {
   loadSettingsFromLocalStorage();
+  adoptProxyProviderIfNeeded();
   applyTheme();
   applyFont();
   populateUiLangSelect();
@@ -6027,6 +6611,7 @@ document.getElementById('btn-toggle-panel').addEventListener('click', togglePane
   await loadInitialDocument();
 
   wireTitleFields();
+  observeTitleFit();
   wireSettingsModal();
   wireSettingsFocusTrap();
   wirePagerControls();
@@ -6041,7 +6626,18 @@ document.getElementById('btn-toggle-panel').addEventListener('click', togglePane
   const savedPage = await loadProgress();
   renderPage(savedPage);
 
-  if (!currentProviderSettings().apiKey) {
+  // On a phone the text and the analysis cannot both be usable at once, so the
+  // reader starts with the whole screen for reading; tapping a sentence opens
+  // the panel, which onSentenceClick already does. Decided once at startup
+  // rather than on resize -- collapsing the panel out from under someone who
+  // merely rotated the device would be worse than starting on the wrong foot.
+  if (window.matchMedia('(max-width: 520px)').matches && !panelEl.classList.contains('collapsed')) {
+    togglePanel();
+  }
+
+  // Nothing to configure when the proxy serving this page holds the key, so
+  // don't open settings to ask for one.
+  if (!currentProviderSettings().apiKey && !proxyInfoFor(settings.provider)) {
     // gentle nudge, not blocking: open settings automatically only the very
     // first time (no settings saved yet at all)
     const neverConfigured = !localStorage.getItem(SETTINGS_KEY);

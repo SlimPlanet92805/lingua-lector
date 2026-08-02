@@ -119,6 +119,51 @@ module.exports = ({ describe, it, assert }) => {
       assert.equal(await get('openIdbWithTimeout')({ open() { throw new Error('private mode'); } }, 1000), null);
     });
 
+    // Firefox and Safari in private browsing, and any browser at its storage
+    // limit, hand back a connection that opens cleanly and then aborts every
+    // transaction. Trusting the open alone was silently fatal: migration
+    // leaves each document in localStorage (correct), but the backend has
+    // already switched, so every read goes to IndexedDB, rejects, and
+    // loadDocumentContent turns that into null -- the entire library opens
+    // blank while the text is still on disk.
+    describe('a backend that opens but does not work', () => {
+      const brokenBackend = () => ({
+        name: 'indexedDB',
+        set: () => Promise.reject(new Error('transaction aborted')),
+        get: () => Promise.reject(new Error('transaction aborted')),
+        remove: () => Promise.reject(new Error('transaction aborted')),
+        keys: () => Promise.reject(new Error('transaction aborted')),
+      });
+
+      it('is rejected by the round-trip probe', async () => {
+        const { get } = loadApp();
+        assert.equal(await get('idbBackendWorks')(brokenBackend()), false);
+      });
+
+      it('is rejected when writes succeed but read back nothing', async () => {
+        // The subtler shape: put() resolves, the data never lands.
+        const { get } = loadApp();
+        const amnesiac = {
+          set: () => Promise.resolve(),
+          get: () => Promise.resolve(null),
+          remove: () => Promise.resolve(),
+        };
+        assert.equal(await get('idbBackendWorks')(amnesiac), false);
+      });
+
+      it('accepts a backend that actually round-trips', async () => {
+        const { get } = loadApp();
+        const store = new Map();
+        const working = {
+          set: (k, v) => { store.set(k, v); return Promise.resolve(); },
+          get: (k) => Promise.resolve(store.has(k) ? store.get(k) : null),
+          remove: (k) => { store.delete(k); return Promise.resolve(); },
+        };
+        assert.equal(await get('idbBackendWorks')(working), true);
+        assert.equal(store.size, 0, 'the probe must clean up after itself');
+      });
+    });
+
     it('keeps the document index out of blob storage', () => {
       // DOC_INDEX_KEY starts with DOC_STORAGE_PREFIX, so a naive prefix match
       // would migrate the index itself into async storage -- where every

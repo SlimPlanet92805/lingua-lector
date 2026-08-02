@@ -34,8 +34,14 @@ USAGE
   # NVIDIA (or any other OpenAI-compatible host) via --openai-base-url:
   python3 server.py --openai-base-url https://integrate.api.nvidia.com --openai-key nvapi-...
 
-Then in Lingua Lector's settings (AI 与模型 tab), for each provider you want
-routed through this proxy, set:
+If you passed a --...-key flag, there is nothing to configure in the app: the
+page served at http://localhost:8787/ is told which providers this proxy holds
+a key for, and fills in their Base URL itself. Just pick that provider in
+settings and start reading -- the API key field can stay empty.
+
+For a provider you did NOT pass a key for, set its Base URL by hand if you want
+its requests relayed (this solves CORS only, not the "key in the browser"
+question -- your real key still goes in the app's settings and is forwarded):
 
   Base URL:  http://localhost:8787/anthropic        (Anthropic)
              http://localhost:8787/openai/v1         (OpenAI-compatible --
@@ -45,12 +51,11 @@ routed through this proxy, set:
                                                         --openai-base-url)
              http://localhost:8787/gemini/v1beta     (Gemini)
 
-  API key:   leave it as whatever you like (e.g. "local-proxy") if you passed
-             the matching --...-key flag above -- the proxy overrides it with
-             the real key. If you did NOT pass a key for that provider, put
-             your real key in the browser field as normal; the proxy just
-             relays it (solving CORS only, not the "key in the browser"
-             question).
+IMPORTANT: open the app from http://localhost:8787/ (this server opens it for
+you). Double-clicking dist/lingua-lector.html gives the page an origin of
+"null", and the proxy refuses those -- otherwise any other local HTML file
+could call this proxy and spend a server-side key. See --allow-origin if you
+have a genuine reason to override that.
 
 All flags also work as environment variables (ANTHROPIC_API_KEY,
 OPENAI_API_KEY, OPENAI_BASE_URL, GEMINI_API_KEY, LINGUA_LECTOR_PROXY_PORT) if
@@ -74,9 +79,35 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 APP_FILE = SCRIPT_DIR / "dist" / "lingua-lector.html"
 
-HOP_BY_HOP_HEADERS = {
-    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+# Only these browser headers are ever forwarded upstream. This is an
+# allow-list rather than the old "forward everything except hop-by-hop"
+# deny-list: a deny-list silently passes along cookies, Referer, and anything
+# else the browser decides to add, which the AI provider has no business
+# seeing. The provider's own auth headers are added conditionally in _proxy().
+ALLOWED_UPSTREAM_HEADERS = {"content-type", "accept"}
+
+# The headers each provider uses to carry a *browser-supplied* key. These are
+# forwarded only when no server-side key is configured for that provider --
+# otherwise the server-side key wins and the browser's value is dropped.
+PROVIDER_AUTH_HEADERS = {
+    "anthropic": {"x-api-key", "anthropic-version",
+                  "anthropic-dangerous-direct-browser-access"},
+    "openai": {"authorization"},
+    "gemini": {"x-goog-api-key"},
+}
+
+# What a browser is allowed to send us on a cross-origin call. Previously "*",
+# which combined with a server-side key meant any page could spend your quota.
+CORS_ALLOWED_REQUEST_HEADERS = ", ".join(sorted(
+    {"content-type", "accept"} | set().union(*PROVIDER_AUTH_HEADERS.values())
+))
+
+# Where each provider's Base URL points on this proxy. Used both for the
+# startup hints and for the config injected into the served page.
+PROXY_PATHS = {
+    "anthropic": "/anthropic",
+    "openai": "/openai/v1",
+    "gemini": "/gemini/v1beta",
 }
 
 
@@ -103,17 +134,103 @@ def parse_args():
                         "502 'read operation timed out' errors.")
     p.add_argument("--no-open", action="store_true",
                    help="Don't automatically open the app in your browser")
+    p.add_argument("--host", default=os.environ.get("LINGUA_LECTOR_PROXY_HOST", "127.0.0.1"),
+                   help="Address to bind. Defaults to 127.0.0.1 -- reachable only from this "
+                        "machine. Pass 0.0.0.0 to also serve the app to phones and tablets on "
+                        "your own network, which is the only practical way to run it on an "
+                        "iPhone offline (iOS cannot open a local .html at all). SECURITY: on "
+                        "0.0.0.0 anyone who can reach this machine on the network can use the "
+                        "proxy, and if you passed a --...-key they can spend it. Fine on a home "
+                        "network you control; do not do it on cafe or hotel Wi-Fi.")
+    p.add_argument("--allow-origin", action="append", default=[], metavar="ORIGIN",
+                   help="Additionally accept cross-origin requests from ORIGIN "
+                        "(repeatable). By default only the app this server itself "
+                        "serves (http://localhost:PORT) may call the proxy, so that "
+                        "a random web page you have open cannot spend a server-side "
+                        "key. Pass 'null' to allow pages opened as file://.")
     return p.parse_args()
 
 
-def make_handler(upstreams, server_side_keys, timeout):
+def _inject_proxy_config(html, server_side_keys, origin):
+    """Tell the page it is being served by this proxy, so the user doesn't have
+    to go into settings and paste three Base URLs by hand.
+
+    The app reads window.LINGUA_LECTOR_PROXY on startup and fills in the Base
+    URL for any provider we hold a key for. Injected at serve time rather than
+    baked into dist/ so the distributed file stays a pure static artifact.
+
+    `origin` is derived from the request's own Host header rather than assumed
+    to be localhost. With --host that assumption breaks in the worst way: a
+    phone loading the app from http://192.168.1.5:8787/ would be handed a Base
+    URL of http://localhost:8787/, which on a phone means the phone itself.
+    """
+    config = {
+        "origin": origin,
+        "providers": {
+            provider: {
+                "baseUrl": f"{origin}{PROXY_PATHS[provider]}",
+                "hasServerKey": bool(key),
+            }
+            for provider, key in server_side_keys.items()
+            if provider in PROXY_PATHS
+        },
+    }
+    # "</" would end the script element early no matter where it appears.
+    payload = json.dumps(config).replace("</", "<\\/")
+    script = f"<script>window.LINGUA_LECTOR_PROXY = {payload};</script>".encode("utf-8")
+    if b"</head>" in html:
+        return html.replace(b"</head>", script + b"</head>", 1)
+    return script + html
+
+
+def make_handler(upstreams, server_side_keys, timeout, allowed_origins, port):
     class ProxyHandler(BaseHTTPRequestHandler):
         def _cors_headers(self):
-            self.send_header("Access-Control-Allow-Origin", "*")
+            # No Origin header means a same-origin request (the app served by
+            # this very server) or a non-browser client like curl. CORS is a
+            # browser-enforced concept; sending the headers anyway would only
+            # widen the surface for no benefit.
+            origin = self.headers.get("Origin")
+            if not origin or origin not in allowed_origins:
+                return
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "*")
+            self.send_header("Access-Control-Allow-Headers", CORS_ALLOWED_REQUEST_HEADERS)
+
+        def _reject_disallowed_origin(self):
+            """Answer and return True if this request comes from an origin we
+            don't serve. Deliberately refuses *before* the upstream call, so a
+            hostile page can't spend a server-side key even once."""
+            origin = self.headers.get("Origin")
+            if not origin or origin in allowed_origins:
+                return False
+            body = (
+                "Refused: this proxy only answers the Lingua Lector page it serves.\n"
+                "\n"
+                f"  rejected Origin:  {origin}\n"
+                f"  allowed:          {', '.join(sorted(allowed_origins))}\n"
+                "\n"
+                f"Open the app at http://localhost:{port}/ instead of opening the HTML\n"
+                "file directly. A file:// page sends \"Origin: null\", which is rejected\n"
+                "because any other local HTML file would then be able to use this proxy\n"
+                "and spend your API key.\n"
+                "\n"
+                "If you really do need another origin:\n"
+                f"  python3 server.py --allow-origin {origin}\n"
+            ).encode("utf-8")
+            self.send_response(403)
+            # No CORS headers here on purpose -- the browser should block the
+            # response body too. The text is for whoever reads the network tab.
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return True
 
         def do_OPTIONS(self):
+            if self._reject_disallowed_origin():
+                return
             self.send_response(204)
             self._cors_headers()
             self.end_headers()
@@ -123,9 +240,13 @@ def make_handler(upstreams, server_side_keys, timeout):
             if path == "/" or path == "/lingua-lector.html":
                 self._serve_app()
                 return
+            if self._reject_disallowed_origin():
+                return
             self._proxy("GET")
 
         def do_POST(self):
+            if self._reject_disallowed_origin():
+                return
             self._proxy("POST")
 
         def _serve_app(self):
@@ -139,7 +260,11 @@ def make_handler(upstreams, server_side_keys, timeout):
                     b"or open the file directly in your browser."
                 )
                 return
-            body = APP_FILE.read_bytes()
+            # Whatever host:port the browser actually used to reach us -- which
+            # with --host is a LAN address, not localhost.
+            host = self.headers.get("Host") or f"localhost:{port}"
+            body = _inject_proxy_config(APP_FILE.read_bytes(), server_side_keys,
+                                        f"http://{host}")
             self.send_response(200)
             self._cors_headers()
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -166,15 +291,21 @@ def make_handler(upstreams, server_side_keys, timeout):
             length = int(self.headers.get("Content-Length", 0) or 0)
             body = self.rfile.read(length) if length else None
 
-            # forward the browser's own headers (Content-Type, and whatever
-            # auth header it sent) as a baseline, then override with the
-            # server-side key if one is configured for this provider
-            headers = {}
-            for name, value in self.headers.items():
-                if name.lower() not in HOP_BY_HOP_HEADERS and name.lower() != "origin":
-                    headers[name] = value
-
             key = server_side_keys.get(provider, "")
+
+            # Allow-list what reaches the provider. When we hold the key for
+            # this provider the browser's auth headers are dropped entirely --
+            # it has no legitimate key to send, and forwarding a stray one
+            # would let the page override our own.
+            forwardable = set(ALLOWED_UPSTREAM_HEADERS)
+            if not key:
+                forwardable |= PROVIDER_AUTH_HEADERS.get(provider, set())
+            headers = {
+                name: value
+                for name, value in self.headers.items()
+                if name.lower() in forwardable
+            }
+
             if provider == "anthropic" and key:
                 headers["x-api-key"] = key
                 headers["anthropic-version"] = "2023-06-01"
@@ -212,6 +343,22 @@ def make_handler(upstreams, server_side_keys, timeout):
     return ProxyHandler
 
 
+def _lan_address():
+    """This machine's address on the local network, for the "open this on your
+    phone" hint. Uses a UDP socket to a public address purely to ask the OS
+    which interface it would route through -- nothing is actually sent."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:  # noqa: BLE001 -- no network, or an unusual setup
+        return None
+
+
 def main():
     args = parse_args()
 
@@ -227,22 +374,48 @@ def main():
     }
     configured = [p for p, k in server_side_keys.items() if k]
 
+    # Both spellings of the loopback address: which one the browser sends as
+    # Origin depends on which one is in the address bar.
+    allowed_origins = {
+        f"http://localhost:{args.port}",
+        f"http://127.0.0.1:{args.port}",
+    } | set(args.allow_origin)
+
+    lan_ip = _lan_address() if args.host == "0.0.0.0" else None
+    if lan_ip:
+        # The phone reaches us at the LAN address, so that origin has to be on
+        # the list too -- and so does the bare IP without a port, for browsers
+        # that normalise it away.
+        allowed_origins.add(f"http://{lan_ip}:{args.port}")
+
     url = f"http://localhost:{args.port}/"
     print(f"Lingua Lector local server listening on {url}")
+    if lan_ip:
+        print(f"Also reachable on your network at http://{lan_ip}:{args.port}/")
+        print("  -> open that on a phone or tablet; iOS cannot open a local .html at all,")
+        print("     and Android blocks network requests from one, so this is the way.")
+        print("  !! Anyone who can reach this machine on the network can use this proxy.")
+        if configured:
+            print("  !! You passed a key, so they could also spend it. Home network only.")
     if configured:
         print(f"Server-side keys configured for: {', '.join(configured)}")
+        print("The app served here configures those providers automatically --")
+        print("you shouldn't need to touch Base URL in settings.")
     else:
         print("No server-side keys configured -- pure CORS relay, browser-supplied keys are forwarded as-is.")
-    print("Point a provider's Base URL in Lingua Lector's settings at, e.g.:")
-    print(f"  http://localhost:{args.port}/anthropic")
-    print(f"  http://localhost:{args.port}/openai/v1   (upstream: {upstreams['openai']})")
-    print(f"  http://localhost:{args.port}/gemini/v1beta")
+        print("Point a provider's Base URL in Lingua Lector's settings at, e.g.:")
+        print(f"  http://localhost:{args.port}/anthropic")
+        print(f"  http://localhost:{args.port}/openai/v1   (upstream: {upstreams['openai']})")
+        print(f"  http://localhost:{args.port}/gemini/v1beta")
+    print(f"Accepting browser requests from: {', '.join(sorted(allowed_origins))}")
+    print("Open the app at the URL above -- a file:// page will be refused.")
 
     if not args.no_open:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
 
-    handler = make_handler(upstreams, server_side_keys, args.timeout)
-    with socketserver.ThreadingTCPServer(("127.0.0.1", args.port), handler) as httpd:
+    handler = make_handler(upstreams, server_side_keys, args.timeout,
+                           allowed_origins, args.port)
+    with socketserver.ThreadingTCPServer((args.host, args.port), handler) as httpd:
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

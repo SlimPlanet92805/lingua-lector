@@ -16,6 +16,9 @@
       <span class="pager-status"><span class="pager-status-prefix" data-i18n="toolbar.pagerPrefix">第 </span><input type="number" class="pager-page-input" min="1" value="1" data-i18n-label="toolbar.pageInputLabel"> / <span class="pager-total">1</span><span class="pager-status-suffix" data-i18n="toolbar.pagerSuffix"> 页</span></span>
       <button class="pager-next" data-i18n="toolbar.nextPage">下一页 →</button>
       <button id="btn-open-settings" data-i18n="toolbar.openSettings">⚙ 设置</button>
+      <!-- Forces the pager onto its own row on phones; display:none otherwise.
+           Purely presentational, hence aria-hidden. -->
+      <div class="toolbar-break" aria-hidden="true"></div>
       <span class="hint" data-i18n="toolbar.hint">点击任意句子查看语法与词汇解析 · 快捷键 ← → 翻页 · Esc 关闭</span>
     </div>
     <div class="reader-inner">

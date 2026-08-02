@@ -25,6 +25,35 @@ module.exports = ({ describe, it, assert }) => {
       }
     });
 
+    // Observed failure: for "Erdbeben" a model produced
+    //   名词（中性，der/das，...）。动词/派生词不适用。
+    // Two separate prompt defects, both fixed and pinned here.
+    //
+    // 1. The prompt used to illustrate German gender as the bare string
+    //    "der/die/das". Read as a *format* rather than a menu, that invites a
+    //    slash-separated answer -- which then contradicts the gender the model
+    //    just stated. The instruction must demand exactly one article.
+    it('tells the model to pick one article rather than list them', () => {
+      const { get } = loadApp();
+      const prompt = get('buildSystemPrompt')();
+      assert.ok(/三选一|只写这个词实际的那一个定冠词/.test(prompt),
+        'prompt must require choosing a single definite article');
+      // The worked example is what makes it concrete for a weak model.
+      assert.includes(prompt, 'der/das', 'prompt should name the wrong form it is ruling out');
+      assert.ok(/Erdbeben[^。]*中性[^。]*只写 das/.test(prompt),
+        'prompt should carry a worked example of the single-article rule');
+    });
+
+    // 2. "不适用的项跳过" was buried in a parenthetical and said nothing about
+    //    *announcing* the skip, so the model dutifully wrote "动词/派生词不适用".
+    it('forbids placeholder text for inapplicable word classes', () => {
+      const { get } = loadApp();
+      const prompt = get('buildSystemPrompt')();
+      assert.ok(/整条略去/.test(prompt), 'prompt must say to omit the whole item');
+      assert.ok(/不适用/.test(prompt) && /N\/A/.test(prompt),
+        'prompt must name the placeholder wordings it is banning');
+    });
+
     it('puts the literal headings and label into the prompt', () => {
       const { get } = loadApp();
       const build = get('buildSystemPrompt');

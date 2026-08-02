@@ -41,7 +41,7 @@ const CHAPTER_INDEX_KEY_PREFIX = 'lingua-lector-chapter-idx-';
 // snapped back to the document's default chapter regardless of where the
 // reader actually was.
 function saveCurrentChapterIndex() {
-  try { localStorage.setItem(CHAPTER_INDEX_KEY_PREFIX + currentDocId, String(currentChapterIndex)); } catch (e) { /* ignore */ }
+  safeStorageWrite(() => localStorage.setItem(CHAPTER_INDEX_KEY_PREFIX + currentDocId, String(currentChapterIndex)));
 }
 
 function loadSavedChapterIndex(docId, maxIndex) {
@@ -85,6 +85,61 @@ function currentProviderSettings() {
   return settings.providers[settings.provider] || PROVIDER_DEFAULTS.anthropic;
 }
 
+// server.py injects this when it serves the page, naming the providers it
+// holds a key for (see _inject_proxy_config there). The name deliberately
+// avoids the double-underscore-wrapped spelling: that shape is reserved for
+// build-time placeholders, and build-integrity.test.js asserts none survive
+// into the built file. Read once, and kept out of
+// `settings` on purpose: it describes whichever server happens to be serving
+// this page right now, so persisting it would leave a dead localhost URL in
+// the reader's settings the next time they open the file directly.
+const PROXY_CONFIG = (typeof window !== 'undefined' && window.LINGUA_LECTOR_PROXY) || null;
+
+function proxyInfoFor(provider) {
+  const info = PROXY_CONFIG && PROXY_CONFIG.providers && PROXY_CONFIG.providers[provider];
+  return info && info.hasServerKey ? info : null;
+}
+
+// A Base URL pointing somewhere other than the provider's own API host is, in
+// practice, a proxy: server.py, the Cloudflare Worker, or a company gateway.
+// Those routinely hold the key themselves, so demanding one in the app would
+// block a setup that works fine.
+function isProxiedProvider(provider, ps) {
+  if (ps && ps.keyHeldByProxy) return true;
+  const configured = ((ps && ps.baseUrl) || '').trim().replace(/\/+$/, '');
+  if (!configured) return false;
+  const dflt = ((PROVIDER_DEFAULTS[provider] || {}).baseUrl || '').replace(/\/+$/, '');
+  // Anthropic's default is empty (it's called directly), so any Base URL at
+  // all means the reader has pointed it at something of their own.
+  return configured !== dflt;
+}
+
+// What a request should actually use: the reader's settings, except that a
+// proxy serving this page and holding this provider's key supplies the Base
+// URL and removes the need for a key field.
+function effectiveProviderSettings(provider) {
+  const ps = settings.providers[provider] || PROVIDER_DEFAULTS.anthropic;
+  const proxy = proxyInfoFor(provider);
+  if (!proxy) return ps;
+  return { ...ps, baseUrl: proxy.baseUrl, keyHeldByProxy: true };
+}
+
+// Someone who starts `server.py --gemini-key ...` means to use Gemini. Without
+// this they'd land on whatever provider was selected before, get "no API key",
+// and have to go into settings anyway -- which is exactly what serving the
+// config was meant to avoid. Only fires when the current provider genuinely
+// can't be used, so it never overrides a deliberate choice.
+function adoptProxyProviderIfNeeded() {
+  if (!PROXY_CONFIG || !PROXY_CONFIG.providers) return;
+  const usable = (provider) => {
+    const ps = settings.providers[provider];
+    return !!(ps && (ps.apiKey || proxyInfoFor(provider) || isProxiedProvider(provider, ps)));
+  };
+  if (usable(settings.provider)) return;
+  const fallback = Object.keys(PROXY_CONFIG.providers).find(usable);
+  if (fallback) settings.provider = fallback;
+}
+
 let settings = { ...DEFAULT_SETTINGS };
 
 // ============================================================
@@ -114,10 +169,10 @@ function isExampleRemoved() {
 }
 
 function setExampleRemoved(removed) {
-  try {
+  safeStorageWrite(() => {
     if (removed) localStorage.setItem(EXAMPLE_REMOVED_KEY, '1');
     else localStorage.removeItem(EXAMPLE_REMOVED_KEY);
-  } catch (e) { /* ignore */ }
+  });
 }
 
 function docStorageKey(id) {
@@ -137,7 +192,7 @@ function loadDocIndex() {
 }
 
 function saveDocIndex(index) {
-  try { localStorage.setItem(DOC_INDEX_KEY, JSON.stringify(index)); } catch (e) { /* ignore */ }
+  safeStorageWrite(() => localStorage.setItem(DOC_INDEX_KEY, JSON.stringify(index)));
 }
 
 function upsertDocIndexEntry(entry) {
@@ -283,13 +338,37 @@ async function migrateBlobsToIdb(backend) {
   }
 }
 
+// Opening the database is not proof that it works. Firefox and Safari in
+// private browsing, and any browser sitting at its storage limit, can hand
+// back a connection that looks fine and then aborts every transaction.
+//
+// Trusting the open alone loses the whole library: migrateBlobsToIdb() fails
+// per key and correctly leaves each document in localStorage, but the backend
+// has already been switched, so every later read goes to IndexedDB, rejects,
+// and loadDocumentContent turns the rejection into null -- every document
+// opens blank while its text is still on disk. So prove a round trip first.
+const BLOB_PROBE_KEY = 'lingua-lector-blob-probe';
+
+async function idbBackendWorks(backend) {
+  try {
+    await backend.set(BLOB_PROBE_KEY, '1');
+    const got = await backend.get(BLOB_PROBE_KEY);
+    await backend.remove(BLOB_PROBE_KEY);
+    return got === '1';
+  } catch (e) {
+    return false;
+  }
+}
+
 function initBlobStore() {
   if (blobStoreReady) return blobStoreReady;
   blobStoreReady = (async () => {
     const factory = (typeof indexedDB !== 'undefined' && indexedDB) ? indexedDB : null;
     const db = await openIdbWithTimeout(factory, BLOB_OPEN_TIMEOUT_MS);
     if (!db) return blobBackend; // localStorage, as before
-    blobBackend = idbBlobBackend(db);
+    const candidate = idbBlobBackend(db);
+    if (!(await idbBackendWorks(candidate))) return blobBackend; // same fallback
+    blobBackend = candidate;
     await migrateBlobsToIdb(blobBackend);
     return blobBackend;
   })();
@@ -349,6 +428,32 @@ function reportStorageError(err) {
     ? t('storage.full', { backend: blobBackend.name })
     : t('storage.writeFailed', { msg: (err && err.message) || String(err) });
   try { setImportStatus(msg, 'error'); } catch (e) { /* settings panel not built yet */ }
+}
+
+// Background writes -- reading progress, the document index, settings -- happen
+// constantly and without the reader asking for them, so they can't report every
+// failure the way an import does: a full disk would mean a message per page
+// turn. Staying completely silent is what made these failures invisible
+// though; the reader closes the tab, loses their place, and never learns why.
+// So: say it once, then stop.
+let backgroundStorageErrorReported = false;
+
+function reportBackgroundStorageError(err) {
+  if (backgroundStorageErrorReported) return;
+  backgroundStorageErrorReported = true;
+  reportStorageError(err);
+}
+
+// For writes whose failure the reader can't act on immediately. Returns whether
+// it worked, for the callers that care.
+function safeStorageWrite(fn) {
+  try {
+    fn();
+    return true;
+  } catch (e) {
+    reportBackgroundStorageError(e);
+    return false;
+  }
 }
 
 async function loadDocumentContent(id) {
@@ -413,9 +518,7 @@ function loadSettingsFromLocalStorage() {
 }
 
 function saveSettingsToLocalStorage() {
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  } catch (e) { /* storage may be unavailable (private browsing, quota) */ }
+  safeStorageWrite(() => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)));
 }
 
 // Resolves true when the document's text is actually on disk. The index entry
@@ -437,7 +540,7 @@ async function saveCurrentDocumentContent() {
     savedAt: Date.now(),
     builtin: currentDocId === BOOK_DOC_ID,
   });
-  try { localStorage.setItem(CURRENT_DOC_POINTER_KEY, currentDocId); } catch (e) { /* ignore */ }
+  safeStorageWrite(() => localStorage.setItem(CURRENT_DOC_POINTER_KEY, currentDocId));
   return true;
 }
 
@@ -1059,7 +1162,7 @@ const I18N = {
     'toolbar.hint': '点击任意句子查看语法与词汇解析 · 快捷键 ← → 翻页 · Esc 关闭',
     'panel.title': '句子解析',
     'panel.closeTitle': '收起侧栏',
-    'panel.emptyMsg': '点击左侧正文中的任意一句，<br>这里会显示句子结构拆解和词汇讲解。',
+    'panel.emptyMsg': '点击正文中的任意一句，<br>这里会显示句子结构拆解和词汇讲解。',
     'panel.loading': '正在解析这句话…',
     'panel.retry': '重试',
     'panel.reanalyze': '重新解析这句话（跳过缓存）',
@@ -1078,6 +1181,7 @@ const I18N = {
     'book.chapterFallback': '第 {n} 章',
     'errors.noKeyNetworkFail': '网络请求失败。如果你不在 claude.ai 里运行本工具，请在设置中填入你自己的 API key。如果你确实在 claude.ai 沙盒里，请检查网络连接后重试。',
     'errors.networkFail': '网络请求失败：可能是断网、被浏览器扩展拦截，或被 CORS 拒绝。如果是 CORS，可改用 Gemini（没有此限制），或按 README 启动 server.py / Cloudflare Worker 代理。',
+    'errors.timeout': '请求超时：等待 3 分钟后仍无响应，可能是模型太慢或服务商没有回应。可以再点一次这句话重试，或在设置里换一个更快的模型。',
     'errors.noKeyStatusFail': '请求失败（状态码 {status}）{detail}。如果你不在 claude.ai 里运行本工具，请在设置中填入你自己的 API key。',
     'errors.invalidKey': 'API key 被拒绝（状态码 401/403）{detail}。请检查 key 是否填错、是否已过期，以及它是否属于当前选中的服务商——把 OpenAI 的 key 填进 Anthropic 一栏是最常见的原因。',
     'errors.rateLimited': '请求过于频繁或已达用量上限（状态码 429）{detail}',
@@ -1191,7 +1295,7 @@ const I18N = {
     'toolbar.hint': '點擊任意句子查看語法與詞彙解析 · 快捷鍵 ← → 翻頁 · Esc 關閉',
     'panel.title': '句子解析',
     'panel.closeTitle': '收起側欄',
-    'panel.emptyMsg': '點擊左側正文中的任意一句，<br>這裡會顯示句子結構拆解和詞彙講解。',
+    'panel.emptyMsg': '點擊正文中的任意一句，<br>這裡會顯示句子結構拆解和詞彙講解。',
     'panel.loading': '正在解析這句話…',
     'panel.retry': '重試',
     'panel.reanalyze': '重新解析這句話（跳過快取）',
@@ -1210,6 +1314,7 @@ const I18N = {
     'book.chapterFallback': '第 {n} 章',
     'errors.noKeyNetworkFail': '網路請求失敗。如果你不在 claude.ai 裡運行本工具，請在設定中填入你自己的 API key。如果你確實在 claude.ai 沙盒裡，請檢查網路連線後重試。',
     'errors.networkFail': '網路請求失敗：可能是斷網、被瀏覽器擴充功能攔截，或被 CORS 拒絕。如果是 CORS，可改用 Gemini（沒有此限制），或依 README 啟動 server.py / Cloudflare Worker 代理。',
+    'errors.timeout': '請求逾時：等待 3 分鐘後仍無回應，可能是模型太慢或服務商沒有回應。可以再點一次這句話重試，或在設定裡換一個更快的模型。',
     'errors.noKeyStatusFail': '請求失敗（狀態碼 {status}）{detail}。如果你不在 claude.ai 裡運行本工具，請在設定中填入你自己的 API key。',
     'errors.invalidKey': 'API key 被拒絕（狀態碼 401/403）{detail}。請檢查 key 是否填錯、是否已過期，以及它是否屬於目前選中的服務商——把 OpenAI 的 key 填進 Anthropic 一欄是最常見的原因。',
     'errors.rateLimited': '請求過於頻繁或已達用量上限（狀態碼 429）{detail}',
@@ -1342,6 +1447,7 @@ const I18N = {
     'book.chapterFallback': 'Chapter {n}',
     'errors.noKeyNetworkFail': 'Network request failed. If you are not running this tool inside claude.ai, enter your own API key in Settings. If you are inside the claude.ai sandbox, check your connection and retry.',
     'errors.networkFail': 'The request failed: no connection, a browser extension blocked it, or CORS refused it. If it is CORS, switch to Gemini (which has no such restriction) or run the server.py / Cloudflare Worker proxy described in the README.',
+    'errors.timeout': 'The request timed out after 3 minutes. The model may be very slow, or the provider stopped responding. Click the sentence again to retry, or choose a faster model in settings.',
     'errors.noKeyStatusFail': 'Request failed (status {status}){detail}. If you are not running this tool inside claude.ai, enter your own API key in Settings.',
     'errors.invalidKey': 'The API key was rejected (401/403){detail}. Check that it is correct, not expired, and belongs to the provider currently selected — pasting an OpenAI key into the Anthropic field is the usual cause.',
     'errors.rateLimited': 'Too many requests or usage limit reached (status 429){detail}',
@@ -1474,6 +1580,7 @@ const I18N = {
     'book.chapterFallback': 'Kapitel {n}',
     'errors.noKeyNetworkFail': 'Netzwerkanfrage fehlgeschlagen. Wenn du dieses Tool nicht in claude.ai nutzt, gib in den Einstellungen deinen eigenen API-Key ein. Falls du dich in der claude.ai-Sandbox befindest, prüfe deine Verbindung und versuche es erneut.',
     'errors.networkFail': 'Die Anfrage schlug fehl: keine Verbindung, von einer Browser-Erweiterung blockiert oder von CORS abgelehnt. Bei CORS können Sie zu Gemini wechseln (dort gibt es die Einschränkung nicht) oder den in der README beschriebenen Proxy (server.py / Cloudflare Worker) verwenden.',
+    'errors.timeout': 'Zeitüberschreitung nach 3 Minuten. Das Modell ist möglicherweise sehr langsam, oder der Anbieter antwortet nicht mehr. Klicken Sie den Satz erneut an, um es zu wiederholen, oder wählen Sie in den Einstellungen ein schnelleres Modell.',
     'errors.noKeyStatusFail': 'Anfrage fehlgeschlagen (Status {status}){detail}. Wenn du dieses Tool nicht in claude.ai nutzt, gib in den Einstellungen deinen eigenen API-Key ein.',
     'errors.invalidKey': 'Der API-Key wurde abgelehnt (401/403){detail}. Prüfen Sie, ob er korrekt und nicht abgelaufen ist und zum aktuell gewählten Anbieter gehört — ein OpenAI-Key im Anthropic-Feld ist die häufigste Ursache.',
     'errors.rateLimited': 'Zu viele Anfragen oder Nutzungslimit erreicht (Status 429){detail}',
@@ -1606,6 +1713,7 @@ const I18N = {
     'book.chapterFallback': 'Chapitre {n}',
     'errors.noKeyNetworkFail': 'Échec de la requête réseau. Si vous n\'utilisez pas cet outil dans claude.ai, saisissez votre propre clé API dans les paramètres. Si vous êtes bien dans le bac à sable claude.ai, vérifiez votre connexion et réessayez.',
     'errors.networkFail': 'Échec de la requête : pas de connexion, blocage par une extension du navigateur, ou refus CORS. En cas de CORS, passez à Gemini (sans cette restriction) ou lancez le proxy server.py / Cloudflare Worker décrit dans le README.',
+    'errors.timeout': 'Délai dépassé après 3 minutes. Le modèle est peut-être très lent, ou le fournisseur ne répond plus. Cliquez à nouveau sur la phrase pour réessayer, ou choisissez un modèle plus rapide dans les paramètres.',
     'errors.noKeyStatusFail': 'Échec de la requête (statut {status}){detail}. Si vous n\'utilisez pas cet outil dans claude.ai, saisissez votre propre clé API dans les paramètres.',
     'errors.invalidKey': 'La clé API a été refusée (401/403){detail}. Vérifiez qu’elle est correcte, non expirée et qu’elle correspond au fournisseur sélectionné — coller une clé OpenAI dans le champ Anthropic est la cause la plus fréquente.',
     'errors.rateLimited': 'Trop de requêtes ou quota atteint (statut 429){detail}',
@@ -1738,6 +1846,7 @@ const I18N = {
     'book.chapterFallback': 'Capítulo {n}',
     'errors.noKeyNetworkFail': 'Fallo en la solicitud de red. Si no estás usando esta herramienta dentro de claude.ai, introduce tu propia clave API en Configuración. Si sí estás en el sandbox de claude.ai, comprueba tu conexión e inténtalo de nuevo.',
     'errors.networkFail': 'La solicitud falló: sin conexión, bloqueada por una extensión del navegador o rechazada por CORS. Si es CORS, cambia a Gemini (que no tiene esa restricción) o usa el proxy server.py / Cloudflare Worker descrito en el README.',
+    'errors.timeout': 'Se agotó el tiempo de espera tras 3 minutos. El modelo puede ser muy lento o el proveedor dejó de responder. Vuelve a hacer clic en la frase para reintentar, o elige un modelo más rápido en los ajustes.',
     'errors.noKeyStatusFail': 'Solicitud fallida (estado {status}){detail}. Si no estás usando esta herramienta dentro de claude.ai, introduce tu propia clave API en Configuración.',
     'errors.invalidKey': 'La clave API fue rechazada (401/403){detail}. Comprueba que sea correcta, que no haya caducado y que corresponda al proveedor seleccionado: pegar una clave de OpenAI en el campo de Anthropic es la causa más común.',
     'errors.rateLimited': 'Demasiadas solicitudes o límite de uso alcanzado (estado 429){detail}',
@@ -1870,6 +1979,7 @@ const I18N = {
     'book.chapterFallback': 'Capitolo {n}',
     'errors.noKeyNetworkFail': 'Richiesta di rete non riuscita. Se non stai usando questo strumento dentro claude.ai, inserisci la tua API key nelle impostazioni. Se sei davvero nella sandbox di claude.ai, controlla la connessione e riprova.',
     'errors.networkFail': 'Richiesta non riuscita: nessuna connessione, bloccata da un’estensione del browser o rifiutata da CORS. Se è CORS, passa a Gemini (che non ha questa limitazione) oppure usa il proxy server.py / Cloudflare Worker descritto nel README.',
+    'errors.timeout': 'Tempo scaduto dopo 3 minuti. Il modello potrebbe essere molto lento oppure il fornitore non risponde più. Fai di nuovo clic sulla frase per riprovare, o scegli un modello più veloce nelle impostazioni.',
     'errors.noKeyStatusFail': 'Richiesta non riuscita (stato {status}){detail}. Se non stai usando questo strumento dentro claude.ai, inserisci la tua API key nelle impostazioni.',
     'errors.invalidKey': 'La chiave API è stata rifiutata (401/403){detail}. Verifica che sia corretta, non scaduta e che appartenga al provider selezionato: incollare una chiave OpenAI nel campo Anthropic è la causa più comune.',
     'errors.rateLimited': 'Troppe richieste o limite di utilizzo raggiunto (stato 429){detail}',
@@ -2002,6 +2112,7 @@ const I18N = {
     'book.chapterFallback': 'Глава {n}',
     'errors.noKeyNetworkFail': 'Сетевой запрос не удался. Если вы используете инструмент не внутри claude.ai, введите свой API-ключ в настройках. Если вы всё же в песочнице claude.ai, проверьте соединение и повторите попытку.',
     'errors.networkFail': 'Запрос не удался: нет соединения, его заблокировало расширение браузера или отклонил CORS. Если дело в CORS, переключитесь на Gemini (там такого ограничения нет) или запустите прокси server.py / Cloudflare Worker, описанный в README.',
+    'errors.timeout': 'Время ожидания истекло через 3 минуты. Модель может быть очень медленной, или провайдер перестал отвечать. Нажмите на предложение ещё раз, чтобы повторить попытку, или выберите более быструю модель в настройках.',
     'errors.noKeyStatusFail': 'Запрос не удался (статус {status}){detail}. Если вы используете инструмент не внутри claude.ai, введите свой API-ключ в настройках.',
     'errors.invalidKey': 'Ключ API отклонён (401/403){detail}. Проверьте, что он верен, не истёк и относится к выбранному провайдеру — ключ OpenAI в поле Anthropic самая частая причина.',
     'errors.rateLimited': 'Слишком много запросов или исчерпан лимит использования (статус 429){detail}',
@@ -2115,7 +2226,7 @@ const I18N = {
     'toolbar.hint': '文をクリックすると文法・語彙解析を表示 · ← → でページ送り · Esc で閉じる',
     'panel.title': '文の解析',
     'panel.closeTitle': 'パネルを閉じる',
-    'panel.emptyMsg': '左側の本文の文をクリックすると、<br>ここに文構造と語彙の解説が表示されます。',
+    'panel.emptyMsg': '本文の文をクリックすると、<br>ここに文構造と語彙の解説が表示されます。',
     'panel.loading': 'この文を解析しています…',
     'panel.retry': '再試行',
     'panel.reanalyze': 'この文を解析し直す（キャッシュを使わない）',
@@ -2134,6 +2245,7 @@ const I18N = {
     'book.chapterFallback': '第{n}章',
     'errors.noKeyNetworkFail': 'ネットワークリクエストに失敗しました。claude.ai 上でこのツールを使用していない場合は、設定で自分の API キーを入力してください。claude.ai のサンドボックス内であれば、接続を確認して再試行してください。',
     'errors.networkFail': 'リクエストに失敗しました：接続がない、ブラウザ拡張機能による遮断、または CORS による拒否です。CORS の場合は Gemini（この制限がありません）に切り替えるか、README の server.py / Cloudflare Worker プロキシをご利用ください。',
+    'errors.timeout': 'リクエストがタイムアウトしました（3 分待っても応答がありません）。モデルが非常に遅いか、プロバイダーが応答していない可能性があります。もう一度文をクリックして再試行するか、設定でより高速なモデルを選んでください。',
     'errors.noKeyStatusFail': 'リクエストに失敗しました（ステータス {status}）{detail}。claude.ai 上でこのツールを使用していない場合は、設定で自分の API キーを入力してください。',
     'errors.invalidKey': 'API キーが拒否されました（401/403）{detail}。キーが正しいか、有効期限が切れていないか、そして現在選択中のプロバイダーのものかを確認してください。OpenAI のキーを Anthropic 欄に貼るのが最も多い原因です。',
     'errors.rateLimited': 'リクエストが多すぎるか、利用上限に達しました（ステータス 429）{detail}',
