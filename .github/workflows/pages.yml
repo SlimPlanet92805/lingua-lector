@@ -58,3 +58,17 @@ jobs:
           path: _site
       - id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          # The action's own default is 10 minutes, and GitHub's Pages backend
+          # can sit in deployment_queued for longer than that when it is busy.
+          # When the timeout fires the action *cancels* the deployment it was
+          # waiting for, so a slow day turns into a red run and an unpublished
+          # release even though nothing is wrong. Waiting is free; cancelling
+          # is not.
+          #
+          # If a run does fail this way, re-dispatch the workflow
+          # (`gh workflow run pages.yml --ref main`). Do NOT use
+          # `gh run rerun --failed`: that uploads a second artifact named
+          # github-pages into the same run, and deploy-pages then refuses with
+          # "Multiple artifacts named github-pages were unexpectedly found".
+          timeout: 1800000
