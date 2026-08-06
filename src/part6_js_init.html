@@ -481,6 +481,74 @@ function wireTitleFields() {
   }
 }
 
+// Probes for the remote diagnostics channel (see debugLog). Installed only when
+// `server.py --debug-log` served this page, so this costs nothing in normal use.
+//
+// The question they answer is deliberately narrow, because it is the one that
+// cannot be answered by reasoning about the code: for a tap that "does nothing",
+// which stage stopped -- did a touch land on the sentence, did the browser turn
+// it into a click, did our handler run? The reported symptom "the sentence
+// highlights but nothing happens" proves none of that: `.sent:active` and the
+// mouseenter-driven `.hover` class paint the identical background without any
+// handler running.
+//
+// elementFromPoint at the touch coordinates is logged too: if it comes back as
+// something other than the sentence, an invisible element is covering it and the
+// whole search moves to CSS.
+function installDebugProbes() {
+  if (!DEBUG_ENDPOINT) return;
+
+  window.addEventListener('error', (e) => {
+    debugLog('error', { msg: e.message, stack: (e.error && e.error.stack) || '' });
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e.reason;
+    debugLog('rejection', { msg: (r && r.message) || String(r), stack: (r && r.stack) || '' });
+  });
+
+  const sidAt = (target) => {
+    const sent = target && target.closest && target.closest('.sent');
+    return sent ? sent.dataset.sid : null;
+  };
+
+  document.addEventListener('touchstart', (e) => {
+    const touch = e.touches[0];
+    if (!touch) return;
+    const hit = document.elementFromPoint(touch.clientX, touch.clientY);
+    debugLog('touchstart', {
+      sid: sidAt(e.target),
+      x: Math.round(touch.clientX), y: Math.round(touch.clientY),
+      // What the browser thinks is at that point, and what our own span is:
+      // a mismatch means something is on top of the text.
+      hit: hit ? hit.className + '#' + (hit.dataset ? hit.dataset.sid : '') : 'none',
+      page: currentPage,
+    });
+  }, { capture: true, passive: true });
+
+  document.addEventListener('click', (e) => {
+    const sent = e.target && e.target.closest && e.target.closest('.sent');
+    debugLog('click', {
+      sid: sidAt(e.target), page: currentPage,
+      // Was this node replaced after we wired it up? A DOM rewriter (browser
+      // translation, an extension) that reassigns innerHTML produces spans
+      // that look identical -- same class, same data-sid -- and carry no
+      // listeners. Both markers below are set by us at build time and cannot
+      // survive such a rewrite.
+      wired: sent ? sent.__wired === true : null,
+      dup: sent ? document.querySelectorAll('.sent[data-sid="' + sent.dataset.sid + '"]').length : 0,
+      // Microsoft Translator stamps these on every element it rewrites, and
+      // wraps translated runs in <font>. Either one appearing is the answer.
+      mst: document.querySelectorAll('[_msttexthash]').length,
+      font: document.getElementsByTagName('font').length,
+    });
+  }, true);
+
+  debugLog('ready', {
+    ua: navigator.userAgent, w: innerWidth, h: innerHeight,
+    touchPoints: navigator.maxTouchPoints,
+  });
+}
+
 // ============================================================
 // App init
 // ============================================================
@@ -498,6 +566,7 @@ document.getElementById('btn-toggle-panel').addEventListener('click', togglePane
 
   await loadInitialDocument();
 
+  wireSentenceDelegation();
   wireTitleFields();
   observeTitleFit();
   wireSettingsModal();
@@ -522,6 +591,8 @@ document.getElementById('btn-toggle-panel').addEventListener('click', togglePane
   if (window.matchMedia('(max-width: 520px)').matches && !panelEl.classList.contains('collapsed')) {
     togglePanel();
   }
+
+  installDebugProbes();
 
   // Nothing to configure when the proxy serving this page holds the key, so
   // don't open settings to ask for one.

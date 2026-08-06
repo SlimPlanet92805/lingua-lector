@@ -268,6 +268,65 @@ function runningHeaderMarks(pageHeaders) {
 // failure mode. Collecting every line first and taking one global mode
 // across the whole document sidesteps this: a handful of front-matter pages
 // can't outvote a whole book's worth of body-margin lines.
+// A running header that survived the geometric folio filter is recognisable by
+// something geometry cannot see: the same text stands in the header band of
+// many different pages.
+//
+// The geometric rule (edge band + short + no lowercase) catches page numbers
+// and all-caps headers, but an anthology's "Author: Title" header has lowercase
+// letters and is not short, so it stayed -- 155 such lines in the
+// Deutschmeister volume, and because a header sits between two halves of a
+// paragraph that continues across a page break, some of them ended up *inside*
+// a paragraph, mid-sentence.
+//
+// Digits are normalised away before counting so that a folio glued to the
+// header ("40 Nachazel: Deutschmeisterbund") counts as the same text on every
+// page. Measured on that book: 528 distinct edge-band texts, of which exactly
+// 12 repeat on 5+ pages, and all 12 are running headers -- no body text comes
+// near the threshold, because body lines differ from page to page.
+//
+// The threshold matches MIN_HEADER_RUN for the same reason it exists there: a
+// page number never repeats, a header holds for a whole article. Note this does
+// NOT use consecutive runs -- a header that alternates recto/verso with another
+// one is still a header. pageHeaders is built *before* this runs, so section
+// detection still sees the headers it needs.
+const MIN_HEADER_PAGES = 5;
+
+function normalizeHeaderText(text) {
+  return text
+    .replace(/\d+/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '')
+    .toLowerCase();
+}
+
+function dropRepeatedRunningHeaders(pageLines) {
+  const pageCount = new Map();
+  for (const { edgeLines } of pageLines) {
+    // Once per page: a header repeated twice on one page is still one page.
+    const seen = new Set();
+    for (const text of edgeLines) {
+      const key = normalizeHeaderText(text);
+      // Too short to be distinctive -- "1904" normalises to nothing at all,
+      // and a two-letter fragment would match far too much.
+      if (key.length < 4 || seen.has(key)) continue;
+      seen.add(key);
+      pageCount.set(key, (pageCount.get(key) || 0) + 1);
+    }
+  }
+
+  for (const entry of pageLines) {
+    // Only lines that stand in this page's own header band are candidates.
+    // The same string appearing in the middle of a page is body text -- an
+    // article's title heading on its opening page, for instance.
+    const inBand = new Set(entry.edgeLines);
+    entry.lines = entry.lines.filter(line => !(
+      inBand.has(line.text) &&
+      (pageCount.get(normalizeHeaderText(line.text)) || 0) >= MIN_HEADER_PAGES
+    ));
+  }
+}
+
 async function extractPdfParagraphsWithPages(pdf) {
   const pageLines = []; // [{ page, lines }, ...], 1-indexed page number
   for (let p = 1; p <= pdf.numPages; p++) {
@@ -281,6 +340,8 @@ async function extractPdfParagraphsWithPages(pdf) {
     pageIndex: page - 1, // 0-based, matching pdf.js's own convention
     tokens: edgeLines,
   }));
+
+  dropRepeatedRunningHeaders(pageLines);
 
   // Body-margin mode, computed separately for odd and even pages. Properly
   // bound books commonly mirror their margins page to page to leave room for
@@ -456,6 +517,37 @@ function joinOutlineTitles(parts) {
     : joined;
 }
 
+// Is this outline actually a table of contents, or just three bookmarks?
+//
+// Having *an* outline was previously enough to be trusted unconditionally. The
+// shape that breaks is the near-empty one -- "Cover / Contents / Text" -- where
+// the last entry silently swallows 95% of the book and the reader gets a 300
+// page "chapter" with no way to navigate it, while the running header sitting
+// on every one of those pages would have given real sections.
+//
+// The load-bearing check is the span one: a bookmark list that leaves one
+// enormous block is not a table of contents whatever its length. The other two
+// are cheap guards around it. All four regression books pass comfortably
+// (Briefe 67 marks/207 pages, Deutschmeister 16/179, Tagebücher 13/445), so
+// these thresholds are nowhere near any real book -- do not tighten them to
+// "improve" something without a failing book in hand.
+function outlineMarksLookUsable(marks, numPages) {
+  if (!numPages || marks.length < 3) return false;
+  // Page spans, front matter included: whatever precedes the first mark becomes
+  // a chapter of its own further down, so it has to be judged like the rest.
+  const bounds = [0, ...marks.map(m => m.pageIndex), numPages];
+  const spans = [];
+  for (let i = 1; i < bounds.length; i++) {
+    const span = bounds[i] - bounds[i - 1];
+    if (span > 0) spans.push(span);
+  }
+  if (spans.length < 3) return false;
+  if (Math.max(...spans) > numPages * 0.6) return false;
+  const sorted = [...spans].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  return median <= numPages * 0.25;
+}
+
 async function extractPdfChapters(arrayBuffer) {
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   pdfLastPageCount = pdf.numPages;
@@ -506,7 +598,7 @@ async function extractPdfChapters(arrayBuffer) {
   // bookmarks are exactly the ones the shape-based heading heuristic does
   // worst on, and a header that changes text is a far more reliable boundary
   // than guessing from paragraph shape.
-  if (marks.length < 2) {
+  if (marks.length < 2 || !outlineMarksLookUsable(marks, pdf.numPages)) {
     const headerMarks = runningHeaderMarks(pageHeaders || []);
     if (headerMarks.length < 1) return null; // nothing to go on; caller falls back
     marks.length = 0;

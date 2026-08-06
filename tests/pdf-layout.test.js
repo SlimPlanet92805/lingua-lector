@@ -403,4 +403,93 @@ module.exports = ({ describe, it, assert }) => {
       assert.deepEqual(marks([[], [], []]), []);
     });
   });
+
+  // The geometric folio filter only catches short, lowercase-free lines in the
+  // page-edge band. An anthology's "Author: Title" running header is neither,
+  // so 155 of them survived into the Deutschmeister text -- some *inside* a
+  // paragraph that continued across the page break. Repetition across pages is
+  // the signal geometry cannot see.
+  describe('repeated running headers', () => {
+    const dropRepeated = (pageLines) => {
+      const { get } = loadApp();
+      get('dropRepeatedRunningHeaders')(pageLines);
+      return pageLines.map(p => p.lines.map(l => l.text));
+    };
+    const page = (header, body) => ({
+      lines: [{ text: header, y: 800, x0: 50 }, { text: body, y: 400, x0: 50 }],
+      edgeLines: [header],
+    });
+
+    it('drops a header that stands on many pages, keeping the body', () => {
+      const pages = [];
+      for (let i = 0; i < 8; i++) pages.push(page('Demel: Deutscher Orden', 'body line ' + i));
+      const got = dropRepeated(pages);
+      assert.deepEqual(got[0], ['body line 0']);
+      assert.equal(got.filter(p => p.length !== 1).length, 0, 'every header dropped');
+    });
+
+    it('counts a folio glued to the header as the same header', () => {
+      // "40 Nachazel: Deutschmeisterbund" and "41 Nachazel: ..." are one header.
+      const pages = [];
+      for (let i = 0; i < 8; i++) pages.push(page(i + ' Nachazel: Deutschmeisterbund', 'body ' + i));
+      assert.deepEqual(dropRepeated(pages)[3], ['body 3']);
+    });
+
+    it('keeps a header that appears on only a few pages', () => {
+      const pages = [];
+      for (let i = 0; i < 4; i++) pages.push(page('Kuderna: Die Fahne', 'body ' + i));
+      assert.deepEqual(dropRepeated(pages)[0], ['Kuderna: Die Fahne', 'body 0']);
+    });
+
+    it('never touches a line outside the page-edge band', () => {
+      // The same words as a real heading on the article's opening page: it is
+      // body text there, and dropping it would delete the title from the text.
+      const pages = [];
+      for (let i = 0; i < 8; i++) pages.push(page('Demel: Deutscher Orden', 'body ' + i));
+      pages.push({
+        lines: [{ text: 'Demel: Deutscher Orden', y: 400, x0: 50 }],
+        edgeLines: [],
+      });
+      assert.deepEqual(dropRepeated(pages)[8], ['Demel: Deutscher Orden']);
+    });
+
+    it('ignores a header with no letters left after normalisation', () => {
+      // Satow's header is the bare year "1904"; digits are normalised away, so
+      // it must not become a match-anything empty key.
+      const pages = [];
+      for (let i = 0; i < 8; i++) pages.push(page('1904', 'body ' + i));
+      assert.deepEqual(dropRepeated(pages)[0], ['1904', 'body 0']);
+    });
+  });
+
+  // Having *an* outline used to be enough. The shape that breaks is the
+  // near-empty one, where one entry swallows most of the book.
+  describe('outline sanity check', () => {
+    const usable = (pageIndexes, numPages) => {
+      const { get } = loadApp();
+      return get('outlineMarksLookUsable')(pageIndexes.map(pageIndex => ({ pageIndex })), numPages);
+    };
+
+    it('rejects Cover / Contents / Text over a 300 page book', () => {
+      assert.equal(usable([0, 2, 5], 300), false,
+        'one entry covering 98% of the book is not a table of contents');
+    });
+
+    it('rejects an outline with fewer than three sections', () => {
+      assert.equal(usable([0, 100], 200), false);
+    });
+
+    it('accepts the four regression books shapes', () => {
+      // Deutschmeister 16 marks / 179 pages, Tagebücher 13 / 445, Briefe 67 / 207.
+      const evenly = (n, pages) => Array.from({ length: n }, (_, i) => Math.floor(i * pages / n));
+      assert.equal(usable(evenly(16, 179), 179), true, 'Deutschmeister');
+      assert.equal(usable(evenly(13, 445), 445), true, 'Tagebücher');
+      assert.equal(usable(evenly(67, 207), 207), true, 'Briefe');
+    });
+
+    it('rejects an outline whose sections are mostly one huge block', () => {
+      // Four marks, but the last runs from page 40 to 400.
+      assert.equal(usable([0, 10, 20, 40], 400), false);
+    });
+  });
 };

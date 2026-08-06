@@ -6,12 +6,22 @@
   (cdnjs only ships pdf.min.mjs now, an ES module) -- loaded as an inline
   module and assigned onto window.pdfjsLib so the rest of the app, which
   checks window.pdfjsLib, doesn't need to know the difference.
+
+  Pinned to an exact version on purpose: this library decides how every
+  imported PDF is turned into text, so it is not something to float.
+  4.10.38 -> 6.2.108 was measured on all four regression books rather than
+  taken on faith. Chapter and paragraph counts are identical; the only
+  differences are 110 paragraphs in the Deutschmeister volume where 6.x
+  inserts a space 4.x was missing ("1695bis" -> "1695 bis", "4.Mai" ->
+  "4. Mai", "Verlustder" -> "Verlust der"). Every single difference was in
+  that direction -- no text changed, no space removed, nothing merged. Those
+  glued tokens are not cosmetic here: they break sentence splitting.
 -->
 <script type="module">
-  import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/pdf.min.mjs";
+  import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.min.mjs";
   window.pdfjsLib = pdfjsLib;
   pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/pdf.worker.min.mjs";
+    "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.worker.min.mjs";
 </script>
 <script>
 "use strict";
@@ -94,6 +104,30 @@ function currentProviderSettings() {
 // this page right now, so persisting it would leave a dead localhost URL in
 // the reader's settings the next time they open the file directly.
 const PROXY_CONFIG = (typeof window !== 'undefined' && window.LINGUA_LECTOR_PROXY) || null;
+
+// Remote diagnostics, off unless `server.py --debug-log` served this page (it
+// injects the endpoint into the proxy config). A phone has no devtools, and a
+// bug that only reproduces on a real Android device is otherwise debugged by
+// asking its owner to describe what they saw -- which is how the "taps do
+// nothing on the first page" report stayed unsolved for two rounds. With this,
+// the phone posts what actually happened and it prints on the PC's terminal.
+//
+// Inert by default: no listeners are installed and nothing is sent when the
+// endpoint is absent, which is every case except a developer deliberately
+// starting the server with the flag.
+const DEBUG_ENDPOINT = (PROXY_CONFIG && PROXY_CONFIG.debugLog) || null;
+
+function debugLog(event, data) {
+  if (!DEBUG_ENDPOINT) return;
+  const payload = JSON.stringify({ t: Math.round(performance.now()), event, ...data });
+  // sendBeacon survives the page being navigated away or backgrounded, which a
+  // fetch() from a click handler does not.
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon(DEBUG_ENDPOINT, new Blob([payload], { type: 'application/json' }));
+    return;
+  }
+  fetch(DEBUG_ENDPOINT, { method: 'POST', body: payload, keepalive: true }).catch(() => {});
+}
 
 function proxyInfoFor(provider) {
   const info = PROXY_CONFIG && PROXY_CONFIG.providers && PROXY_CONFIG.providers[provider];

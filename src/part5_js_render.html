@@ -173,22 +173,70 @@ function appendSentenceSpan(pEl, pIdx, id, text, isFirst) {
   if (isFirst) {
     span.setAttribute('role', 'button');
     span.tabIndex = 0;
-    span.addEventListener('keydown', (e) => {
-      if (e.key !== 'Enter' && e.key !== ' ') return;
-      e.preventDefault();
-      onSentenceClick(span, sentenceTexts.get(id) || text);
-    });
   }
-  span.addEventListener('click', () => onSentenceClick(span, sentenceTexts.get(id) || text));
-  // A sentence split by a footnote is several elements, so :hover on one of
-  // them cannot light up the rest -- drive the highlight from JS instead.
-  span.addEventListener('mouseenter', () => {
-    spansForSentence(id).forEach((el) => el.classList.add('hover'));
-  });
-  span.addEventListener('mouseleave', () => {
-    spansForSentence(id).forEach((el) => el.classList.remove('hover'));
-  });
+  // A property, not an attribute, so it cannot survive a rebuild from
+  // serialized HTML: that is what makes it a reliable "this node is the one we
+  // created" marker for the click probe in installDebugProbes.
+  span.__wired = true;
   pEl.appendChild(span);
+}
+
+// All sentence interaction is delegated to the container, which outlives every
+// page render -- there are no per-span listeners at all.
+//
+// This is not a tidiness refactor. Per-span listeners made the app depend on
+// nobody ever rebuilding those spans, and something does: a browser's page
+// translator (Chromium's, as used by Edge on Android) re-creates the paragraphs
+// it processes from serialized HTML. The rebuilt spans keep their class,
+// data-sid and text, and lose every listener -- so tapping them highlighted the
+// sentence (that is CSS :active, which needs no JS) and did nothing else, on
+// exactly the part of the page the translator had reached. Going to the next
+// page and back "fixed" it because that renders fresh spans.
+//
+// Delegation is immune to the whole class: whatever rebuilds a span, it is
+// still inside the container, so the handler still finds it via closest().
+// (translate="no" on the container stops that particular rewriter too, but the
+// same trick is available to extensions, reader modes and userscripts.)
+function wireSentenceDelegation() {
+  const root = document.getElementById('text-container');
+  if (!root) return;
+
+  const sentenceAt = (node) => (node && node.closest) ? node.closest('.sent') : null;
+  // The text of the *unit*, not of the span: a sentence split by a footnote has
+  // several spans, and the span's own text would key to a different cache entry.
+  // Keys are numbers (rebuildParagraphSentences assigns them from a counter);
+  // data-sid comes back as a string, hence the conversion.
+  const textFor = (span) => sentenceTexts.get(Number(span.dataset.sid)) || span.textContent;
+
+  root.addEventListener('click', (e) => {
+    const span = sentenceAt(e.target);
+    if (span) onSentenceClick(span, textFor(span));
+  });
+
+  root.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const span = sentenceAt(e.target);
+    if (!span || span.getAttribute('role') !== 'button') return;
+    e.preventDefault();
+    onSentenceClick(span, textFor(span));
+  });
+
+  // mouseenter/mouseleave don't bubble, so delegation uses mouseover/mouseout.
+  // The comparison is by sid rather than by element: a sentence split by a
+  // footnote is several spans, and crossing from one of them to another is
+  // movement *within* one sentence -- comparing elements made the highlight
+  // flicker off and back on at every internal boundary.
+  const sidAt = (node) => { const s = sentenceAt(node); return s ? s.dataset.sid : null; };
+  root.addEventListener('mouseover', (e) => {
+    const span = sentenceAt(e.target);
+    if (!span || sidAt(e.relatedTarget) === span.dataset.sid) return;
+    spansForSentence(span.dataset.sid).forEach((el) => el.classList.add('hover'));
+  });
+  root.addEventListener('mouseout', (e) => {
+    const span = sentenceAt(e.target);
+    if (!span || sidAt(e.relatedTarget) === span.dataset.sid) return;
+    spansForSentence(span.dataset.sid).forEach((el) => el.classList.remove('hover'));
+  });
 }
 
 function renderAllParagraphsInto(el) {
@@ -754,6 +802,9 @@ function togglePanel() {
 // Click handling + caching
 // ============================================================
 async function onSentenceClick(span, sentenceText) {
+  // Third stage of the tap probe (touchstart -> click -> here). No-op unless
+  // server.py --debug-log served this page; see installDebugProbes.
+  debugLog('onSentenceClick', { sid: span.dataset.sid, page: currentPage, len: sentenceText.length });
   // A sentence interrupted by a footnote is rendered as several spans; the
   // whole sentence must light up, not just the half that was clicked.
   if (activeSpan) {

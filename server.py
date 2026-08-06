@@ -171,6 +171,13 @@ def parse_args():
                         "0.0.0.0 anyone who can reach this machine on the network can use the "
                         "proxy, and if you passed a --...-key they can spend it. Fine on a home "
                         "network you control; do not do it on cafe or hotel Wi-Fi.")
+    p.add_argument("--debug-log", action="store_true",
+                   help="Accept diagnostic reports from the page at POST /debug and print them "
+                        "here. Use with --host 0.0.0.0 to debug on a phone: a phone has no "
+                        "devtools, so this is how a tap that 'does nothing' gets explained -- the "
+                        "page reports which stage stopped (touch / click / handler) and any "
+                        "exception, and it appears on this terminal. Off by default; the route "
+                        "404s and the page installs no probes unless this flag is passed.")
     p.add_argument("--allow-origin", action="append", default=[], metavar="ORIGIN",
                    help="Additionally accept cross-origin requests from ORIGIN "
                         "(repeatable). By default only the app this server itself "
@@ -180,7 +187,7 @@ def parse_args():
     return p.parse_args()
 
 
-def _inject_proxy_config(html, server_side_keys, origin):
+def _inject_proxy_config(html, server_side_keys, origin, debug_log=False):
     """Tell the page it is being served by this proxy, so the user doesn't have
     to go into settings and paste three Base URLs by hand.
 
@@ -195,6 +202,9 @@ def _inject_proxy_config(html, server_side_keys, origin):
     """
     config = {
         "origin": origin,
+        # Absent unless --debug-log, and the page installs its probes only when
+        # it is present -- a distributed dist/ file never phones anywhere.
+        **({"debugLog": f"{origin}/debug"} if debug_log else {}),
         "providers": {
             provider: {
                 "baseUrl": f"{origin}{PROXY_PATHS[provider]}",
@@ -212,7 +222,8 @@ def _inject_proxy_config(html, server_side_keys, origin):
     return script + html
 
 
-def make_handler(upstreams, server_side_keys, timeout, allowed_origins, port):
+def make_handler(upstreams, server_side_keys, timeout, allowed_origins, port,
+                 debug_log=False):
     class ProxyHandler(BaseHTTPRequestHandler):
         def _cors_headers(self):
             # No Origin header means a same-origin request (the app served by
@@ -276,7 +287,33 @@ def make_handler(upstreams, server_side_keys, timeout, allowed_origins, port):
         def do_POST(self):
             if self._reject_disallowed_origin():
                 return
+            if self.path.split("?", 1)[0] == "/debug":
+                self._collect_debug()
+                return
             self._proxy("POST")
+
+        def _collect_debug(self):
+            """Print one diagnostic report from the page. See --debug-log."""
+            if not debug_log:
+                self.send_response(404)
+                self._cors_headers()
+                self.end_headers()
+                return
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b""
+            try:
+                report = json.loads(raw.decode("utf-8"))
+                event = report.pop("event", "?")
+                # One line per event: a tap produces three of them, and reading
+                # them as a sequence is the whole point.
+                print(f"[debug] {event:16} " +
+                      " ".join(f"{k}={v}" for k, v in report.items()), flush=True)
+            except Exception:  # noqa: BLE001 -- a malformed report is still a clue
+                print(f"[debug] unparsed: {raw[:500]!r}", flush=True)
+            # 204 keeps sendBeacon quiet; the page never reads a response.
+            self.send_response(204)
+            self._cors_headers()
+            self.end_headers()
 
         def _serve_app(self):
             if not APP_FILE.exists():
@@ -293,7 +330,7 @@ def make_handler(upstreams, server_side_keys, timeout, allowed_origins, port):
             # with --host is a LAN address, not localhost.
             host = self.headers.get("Host") or f"localhost:{port}"
             body = _inject_proxy_config(APP_FILE.read_bytes(), server_side_keys,
-                                        f"http://{host}")
+                                        f"http://{host}", debug_log)
             self.send_response(200)
             self._cors_headers()
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -445,7 +482,7 @@ def main():
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
 
     handler = make_handler(upstreams, server_side_keys, args.timeout,
-                           allowed_origins, args.port)
+                           allowed_origins, args.port, args.debug_log)
     with socketserver.ThreadingTCPServer((args.host, args.port), handler) as httpd:
         try:
             httpd.serve_forever()

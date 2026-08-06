@@ -1098,7 +1098,17 @@
         <button class="add-dates-btn hidden" id="btn-add-dates" data-i18n="book.addDateRange">+ 添加副标题/日期范围</button>
       </div>
       <div class="divider"></div>
-      <div id="text-container"><div id="text-columns"></div></div>
+      <!-- translate="no" + .notranslate: keep the browser's page translator out
+           of the source text. Two reasons, either sufficient. (1) It is the
+           text the reader came to read in the original -- silently replacing it
+           with a machine translation defeats the entire tool. (2) The translator
+           rebuilds the paragraphs it touches from serialized HTML, which
+           produced spans that looked right (same class, same data-sid) but had
+           no event listeners: on Android/Edge every sentence in the part of the
+           first page it had reached highlighted on tap and did nothing else.
+           The delegated click handler now survives that anyway; this stops it
+           from happening in the first place. -->
+      <div id="text-container" translate="no" class="notranslate"><div id="text-columns"></div></div>
       <div class="bottom-pager" id="bottom-pager-wrap">
         <button class="pager-prev" data-i18n="toolbar.prevPage">← 上一页</button>
         <span class="pager-status"><span class="pager-status-prefix" data-i18n="toolbar.pagerPrefix">第 </span><input type="number" class="pager-page-input" min="1" value="1" data-i18n-label="toolbar.pageInputLabel"> / <span class="pager-total">1</span><span class="pager-status-suffix" data-i18n="toolbar.pagerSuffix"> 页</span></span>
@@ -1112,7 +1122,8 @@
       <h2 id="panel-title" data-i18n="panel.title">句子解析</h2>
       <button class="panel-close" id="btn-close-panel" data-i18n-title="panel.closeTitle" data-i18n-label="panel.closeTitle" title="收起侧栏">→</button>
     </div>
-    <div class="panel-quote" id="panel-quote" style="display:none;"></div>
+    <!-- the sentence under analysis, quoted in the original: same reasoning -->
+    <div class="panel-quote notranslate" id="panel-quote" translate="no" style="display:none;"></div>
     <div class="panel-body" id="panel-body" aria-live="polite" aria-busy="false">
       <div class="panel-empty" id="panel-empty-msg" data-i18n="panel.emptyMsg">点击左侧正文中的任意一句，<br>这里会显示句子结构拆解和词汇讲解。</div>
     </div>
@@ -1375,12 +1386,22 @@
   (cdnjs only ships pdf.min.mjs now, an ES module) -- loaded as an inline
   module and assigned onto window.pdfjsLib so the rest of the app, which
   checks window.pdfjsLib, doesn't need to know the difference.
+
+  Pinned to an exact version on purpose: this library decides how every
+  imported PDF is turned into text, so it is not something to float.
+  4.10.38 -> 6.2.108 was measured on all four regression books rather than
+  taken on faith. Chapter and paragraph counts are identical; the only
+  differences are 110 paragraphs in the Deutschmeister volume where 6.x
+  inserts a space 4.x was missing ("1695bis" -> "1695 bis", "4.Mai" ->
+  "4. Mai", "Verlustder" -> "Verlust der"). Every single difference was in
+  that direction -- no text changed, no space removed, nothing merged. Those
+  glued tokens are not cosmetic here: they break sentence splitting.
 -->
 <script type="module">
-  import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/pdf.min.mjs";
+  import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.min.mjs";
   window.pdfjsLib = pdfjsLib;
   pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/pdf.worker.min.mjs";
+    "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.worker.min.mjs";
 </script>
 <script>
 "use strict";
@@ -1463,6 +1484,30 @@ function currentProviderSettings() {
 // this page right now, so persisting it would leave a dead localhost URL in
 // the reader's settings the next time they open the file directly.
 const PROXY_CONFIG = (typeof window !== 'undefined' && window.LINGUA_LECTOR_PROXY) || null;
+
+// Remote diagnostics, off unless `server.py --debug-log` served this page (it
+// injects the endpoint into the proxy config). A phone has no devtools, and a
+// bug that only reproduces on a real Android device is otherwise debugged by
+// asking its owner to describe what they saw -- which is how the "taps do
+// nothing on the first page" report stayed unsolved for two rounds. With this,
+// the phone posts what actually happened and it prints on the PC's terminal.
+//
+// Inert by default: no listeners are installed and nothing is sent when the
+// endpoint is absent, which is every case except a developer deliberately
+// starting the server with the flag.
+const DEBUG_ENDPOINT = (PROXY_CONFIG && PROXY_CONFIG.debugLog) || null;
+
+function debugLog(event, data) {
+  if (!DEBUG_ENDPOINT) return;
+  const payload = JSON.stringify({ t: Math.round(performance.now()), event, ...data });
+  // sendBeacon survives the page being navigated away or backgrounded, which a
+  // fetch() from a click handler does not.
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon(DEBUG_ENDPOINT, new Blob([payload], { type: 'application/json' }));
+    return;
+  }
+  fetch(DEBUG_ENDPOINT, { method: 'POST', body: payload, keepalive: true }).catch(() => {});
+}
 
 function proxyInfoFor(provider) {
   const info = PROXY_CONFIG && PROXY_CONFIG.providers && PROXY_CONFIG.providers[provider];
@@ -4076,6 +4121,65 @@ function runningHeaderMarks(pageHeaders) {
 // failure mode. Collecting every line first and taking one global mode
 // across the whole document sidesteps this: a handful of front-matter pages
 // can't outvote a whole book's worth of body-margin lines.
+// A running header that survived the geometric folio filter is recognisable by
+// something geometry cannot see: the same text stands in the header band of
+// many different pages.
+//
+// The geometric rule (edge band + short + no lowercase) catches page numbers
+// and all-caps headers, but an anthology's "Author: Title" header has lowercase
+// letters and is not short, so it stayed -- 155 such lines in the
+// Deutschmeister volume, and because a header sits between two halves of a
+// paragraph that continues across a page break, some of them ended up *inside*
+// a paragraph, mid-sentence.
+//
+// Digits are normalised away before counting so that a folio glued to the
+// header ("40 Nachazel: Deutschmeisterbund") counts as the same text on every
+// page. Measured on that book: 528 distinct edge-band texts, of which exactly
+// 12 repeat on 5+ pages, and all 12 are running headers -- no body text comes
+// near the threshold, because body lines differ from page to page.
+//
+// The threshold matches MIN_HEADER_RUN for the same reason it exists there: a
+// page number never repeats, a header holds for a whole article. Note this does
+// NOT use consecutive runs -- a header that alternates recto/verso with another
+// one is still a header. pageHeaders is built *before* this runs, so section
+// detection still sees the headers it needs.
+const MIN_HEADER_PAGES = 5;
+
+function normalizeHeaderText(text) {
+  return text
+    .replace(/\d+/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '')
+    .toLowerCase();
+}
+
+function dropRepeatedRunningHeaders(pageLines) {
+  const pageCount = new Map();
+  for (const { edgeLines } of pageLines) {
+    // Once per page: a header repeated twice on one page is still one page.
+    const seen = new Set();
+    for (const text of edgeLines) {
+      const key = normalizeHeaderText(text);
+      // Too short to be distinctive -- "1904" normalises to nothing at all,
+      // and a two-letter fragment would match far too much.
+      if (key.length < 4 || seen.has(key)) continue;
+      seen.add(key);
+      pageCount.set(key, (pageCount.get(key) || 0) + 1);
+    }
+  }
+
+  for (const entry of pageLines) {
+    // Only lines that stand in this page's own header band are candidates.
+    // The same string appearing in the middle of a page is body text -- an
+    // article's title heading on its opening page, for instance.
+    const inBand = new Set(entry.edgeLines);
+    entry.lines = entry.lines.filter(line => !(
+      inBand.has(line.text) &&
+      (pageCount.get(normalizeHeaderText(line.text)) || 0) >= MIN_HEADER_PAGES
+    ));
+  }
+}
+
 async function extractPdfParagraphsWithPages(pdf) {
   const pageLines = []; // [{ page, lines }, ...], 1-indexed page number
   for (let p = 1; p <= pdf.numPages; p++) {
@@ -4089,6 +4193,8 @@ async function extractPdfParagraphsWithPages(pdf) {
     pageIndex: page - 1, // 0-based, matching pdf.js's own convention
     tokens: edgeLines,
   }));
+
+  dropRepeatedRunningHeaders(pageLines);
 
   // Body-margin mode, computed separately for odd and even pages. Properly
   // bound books commonly mirror their margins page to page to leave room for
@@ -4264,6 +4370,37 @@ function joinOutlineTitles(parts) {
     : joined;
 }
 
+// Is this outline actually a table of contents, or just three bookmarks?
+//
+// Having *an* outline was previously enough to be trusted unconditionally. The
+// shape that breaks is the near-empty one -- "Cover / Contents / Text" -- where
+// the last entry silently swallows 95% of the book and the reader gets a 300
+// page "chapter" with no way to navigate it, while the running header sitting
+// on every one of those pages would have given real sections.
+//
+// The load-bearing check is the span one: a bookmark list that leaves one
+// enormous block is not a table of contents whatever its length. The other two
+// are cheap guards around it. All four regression books pass comfortably
+// (Briefe 67 marks/207 pages, Deutschmeister 16/179, Tagebücher 13/445), so
+// these thresholds are nowhere near any real book -- do not tighten them to
+// "improve" something without a failing book in hand.
+function outlineMarksLookUsable(marks, numPages) {
+  if (!numPages || marks.length < 3) return false;
+  // Page spans, front matter included: whatever precedes the first mark becomes
+  // a chapter of its own further down, so it has to be judged like the rest.
+  const bounds = [0, ...marks.map(m => m.pageIndex), numPages];
+  const spans = [];
+  for (let i = 1; i < bounds.length; i++) {
+    const span = bounds[i] - bounds[i - 1];
+    if (span > 0) spans.push(span);
+  }
+  if (spans.length < 3) return false;
+  if (Math.max(...spans) > numPages * 0.6) return false;
+  const sorted = [...spans].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  return median <= numPages * 0.25;
+}
+
 async function extractPdfChapters(arrayBuffer) {
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   pdfLastPageCount = pdf.numPages;
@@ -4314,7 +4451,7 @@ async function extractPdfChapters(arrayBuffer) {
   // bookmarks are exactly the ones the shape-based heading heuristic does
   // worst on, and a header that changes text is a far more reliable boundary
   // than guessing from paragraph shape.
-  if (marks.length < 2) {
+  if (marks.length < 2 || !outlineMarksLookUsable(marks, pdf.numPages)) {
     const headerMarks = runningHeaderMarks(pageHeaders || []);
     if (headerMarks.length < 1) return null; // nothing to go on; caller falls back
     marks.length = 0;
@@ -4940,22 +5077,70 @@ function appendSentenceSpan(pEl, pIdx, id, text, isFirst) {
   if (isFirst) {
     span.setAttribute('role', 'button');
     span.tabIndex = 0;
-    span.addEventListener('keydown', (e) => {
-      if (e.key !== 'Enter' && e.key !== ' ') return;
-      e.preventDefault();
-      onSentenceClick(span, sentenceTexts.get(id) || text);
-    });
   }
-  span.addEventListener('click', () => onSentenceClick(span, sentenceTexts.get(id) || text));
-  // A sentence split by a footnote is several elements, so :hover on one of
-  // them cannot light up the rest -- drive the highlight from JS instead.
-  span.addEventListener('mouseenter', () => {
-    spansForSentence(id).forEach((el) => el.classList.add('hover'));
-  });
-  span.addEventListener('mouseleave', () => {
-    spansForSentence(id).forEach((el) => el.classList.remove('hover'));
-  });
+  // A property, not an attribute, so it cannot survive a rebuild from
+  // serialized HTML: that is what makes it a reliable "this node is the one we
+  // created" marker for the click probe in installDebugProbes.
+  span.__wired = true;
   pEl.appendChild(span);
+}
+
+// All sentence interaction is delegated to the container, which outlives every
+// page render -- there are no per-span listeners at all.
+//
+// This is not a tidiness refactor. Per-span listeners made the app depend on
+// nobody ever rebuilding those spans, and something does: a browser's page
+// translator (Chromium's, as used by Edge on Android) re-creates the paragraphs
+// it processes from serialized HTML. The rebuilt spans keep their class,
+// data-sid and text, and lose every listener -- so tapping them highlighted the
+// sentence (that is CSS :active, which needs no JS) and did nothing else, on
+// exactly the part of the page the translator had reached. Going to the next
+// page and back "fixed" it because that renders fresh spans.
+//
+// Delegation is immune to the whole class: whatever rebuilds a span, it is
+// still inside the container, so the handler still finds it via closest().
+// (translate="no" on the container stops that particular rewriter too, but the
+// same trick is available to extensions, reader modes and userscripts.)
+function wireSentenceDelegation() {
+  const root = document.getElementById('text-container');
+  if (!root) return;
+
+  const sentenceAt = (node) => (node && node.closest) ? node.closest('.sent') : null;
+  // The text of the *unit*, not of the span: a sentence split by a footnote has
+  // several spans, and the span's own text would key to a different cache entry.
+  // Keys are numbers (rebuildParagraphSentences assigns them from a counter);
+  // data-sid comes back as a string, hence the conversion.
+  const textFor = (span) => sentenceTexts.get(Number(span.dataset.sid)) || span.textContent;
+
+  root.addEventListener('click', (e) => {
+    const span = sentenceAt(e.target);
+    if (span) onSentenceClick(span, textFor(span));
+  });
+
+  root.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const span = sentenceAt(e.target);
+    if (!span || span.getAttribute('role') !== 'button') return;
+    e.preventDefault();
+    onSentenceClick(span, textFor(span));
+  });
+
+  // mouseenter/mouseleave don't bubble, so delegation uses mouseover/mouseout.
+  // The comparison is by sid rather than by element: a sentence split by a
+  // footnote is several spans, and crossing from one of them to another is
+  // movement *within* one sentence -- comparing elements made the highlight
+  // flicker off and back on at every internal boundary.
+  const sidAt = (node) => { const s = sentenceAt(node); return s ? s.dataset.sid : null; };
+  root.addEventListener('mouseover', (e) => {
+    const span = sentenceAt(e.target);
+    if (!span || sidAt(e.relatedTarget) === span.dataset.sid) return;
+    spansForSentence(span.dataset.sid).forEach((el) => el.classList.add('hover'));
+  });
+  root.addEventListener('mouseout', (e) => {
+    const span = sentenceAt(e.target);
+    if (!span || sidAt(e.relatedTarget) === span.dataset.sid) return;
+    spansForSentence(span.dataset.sid).forEach((el) => el.classList.remove('hover'));
+  });
 }
 
 function renderAllParagraphsInto(el) {
@@ -5521,6 +5706,9 @@ function togglePanel() {
 // Click handling + caching
 // ============================================================
 async function onSentenceClick(span, sentenceText) {
+  // Third stage of the tap probe (touchstart -> click -> here). No-op unless
+  // server.py --debug-log served this page; see installDebugProbes.
+  debugLog('onSentenceClick', { sid: span.dataset.sid, page: currentPage, len: sentenceText.length });
   // A sentence interrupted by a footnote is rendered as several spans; the
   // whole sentence must light up, not just the half that was clicked.
   if (activeSpan) {
@@ -6679,6 +6867,74 @@ function wireTitleFields() {
   }
 }
 
+// Probes for the remote diagnostics channel (see debugLog). Installed only when
+// `server.py --debug-log` served this page, so this costs nothing in normal use.
+//
+// The question they answer is deliberately narrow, because it is the one that
+// cannot be answered by reasoning about the code: for a tap that "does nothing",
+// which stage stopped -- did a touch land on the sentence, did the browser turn
+// it into a click, did our handler run? The reported symptom "the sentence
+// highlights but nothing happens" proves none of that: `.sent:active` and the
+// mouseenter-driven `.hover` class paint the identical background without any
+// handler running.
+//
+// elementFromPoint at the touch coordinates is logged too: if it comes back as
+// something other than the sentence, an invisible element is covering it and the
+// whole search moves to CSS.
+function installDebugProbes() {
+  if (!DEBUG_ENDPOINT) return;
+
+  window.addEventListener('error', (e) => {
+    debugLog('error', { msg: e.message, stack: (e.error && e.error.stack) || '' });
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e.reason;
+    debugLog('rejection', { msg: (r && r.message) || String(r), stack: (r && r.stack) || '' });
+  });
+
+  const sidAt = (target) => {
+    const sent = target && target.closest && target.closest('.sent');
+    return sent ? sent.dataset.sid : null;
+  };
+
+  document.addEventListener('touchstart', (e) => {
+    const touch = e.touches[0];
+    if (!touch) return;
+    const hit = document.elementFromPoint(touch.clientX, touch.clientY);
+    debugLog('touchstart', {
+      sid: sidAt(e.target),
+      x: Math.round(touch.clientX), y: Math.round(touch.clientY),
+      // What the browser thinks is at that point, and what our own span is:
+      // a mismatch means something is on top of the text.
+      hit: hit ? hit.className + '#' + (hit.dataset ? hit.dataset.sid : '') : 'none',
+      page: currentPage,
+    });
+  }, { capture: true, passive: true });
+
+  document.addEventListener('click', (e) => {
+    const sent = e.target && e.target.closest && e.target.closest('.sent');
+    debugLog('click', {
+      sid: sidAt(e.target), page: currentPage,
+      // Was this node replaced after we wired it up? A DOM rewriter (browser
+      // translation, an extension) that reassigns innerHTML produces spans
+      // that look identical -- same class, same data-sid -- and carry no
+      // listeners. Both markers below are set by us at build time and cannot
+      // survive such a rewrite.
+      wired: sent ? sent.__wired === true : null,
+      dup: sent ? document.querySelectorAll('.sent[data-sid="' + sent.dataset.sid + '"]').length : 0,
+      // Microsoft Translator stamps these on every element it rewrites, and
+      // wraps translated runs in <font>. Either one appearing is the answer.
+      mst: document.querySelectorAll('[_msttexthash]').length,
+      font: document.getElementsByTagName('font').length,
+    });
+  }, true);
+
+  debugLog('ready', {
+    ua: navigator.userAgent, w: innerWidth, h: innerHeight,
+    touchPoints: navigator.maxTouchPoints,
+  });
+}
+
 // ============================================================
 // App init
 // ============================================================
@@ -6696,6 +6952,7 @@ document.getElementById('btn-toggle-panel').addEventListener('click', togglePane
 
   await loadInitialDocument();
 
+  wireSentenceDelegation();
   wireTitleFields();
   observeTitleFit();
   wireSettingsModal();
@@ -6720,6 +6977,8 @@ document.getElementById('btn-toggle-panel').addEventListener('click', togglePane
   if (window.matchMedia('(max-width: 520px)').matches && !panelEl.classList.contains('collapsed')) {
     togglePanel();
   }
+
+  installDebugProbes();
 
   // Nothing to configure when the proxy serving this page holds the key, so
   // don't open settings to ask for one.

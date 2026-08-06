@@ -109,6 +109,11 @@ pager sits on its own row, and tapping a sentence works exactly as clicking one 
 browser's storage on the device, the same as on a desktop — nothing is sent anywhere except
 to the AI provider you configured.
 
+If your browser offers to translate the page, the text you are reading stays in its original
+language whatever you answer: it is marked untranslatable, because replacing the sentences
+you came to study with a machine translation would defeat the point. Everything else — menus,
+the analysis — is already in whichever language you picked in settings.
+
 A downloaded `.html` will *not* work on a phone, and this is not something the file can fix:
 
 | | what happens | why |
@@ -133,9 +138,12 @@ downloaded file (plus `server.py` where noted) if any of these is you:
   site into your private network, and your model server won't be answering those checks. Open
   the file locally instead, or run `server.py --openai-base-url http://localhost:11434/v1`
   and point the app at the proxy. **This is the main case.**
-- **You point at a proxy on a plain-`http` address** — a `server.py` on your LAN
-  (`http://192.168.…`) is refused outright as mixed content by an `https` page. A Cloudflare
-  Worker is fine, because it is itself `https`.
+- **You use the `server.py` proxy** — it is a small program on your own machine and serves over
+  plain `http` (`http://localhost:8787`, or `http://192.168.…` on your LAN); it has no https
+  certificate and needs none. An `https` page is *not allowed* to call an `http` address (the
+  browser's mixed-content rule), and that is not a setting you can change. So when you run
+  `server.py`, use the page it serves — it opens it for you — rather than the hosted copy. A
+  Cloudflare Worker is unaffected, being itself `https`.
 - **You need it fully offline** — the hosted copy has to be fetched before it will run.
   The downloaded file doesn't (the AI call still needs the network, unless it's a local
   model, in which case the whole thing runs with no internet at all).

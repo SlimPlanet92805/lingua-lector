@@ -73,6 +73,42 @@ module.exports = ({ describe, it, assert }) => {
       assert.deepEqual([...new Set(missing)], [], 'getElementById targets with no matching id=');
     });
 
+    // Both halves of the Android "tapping the first page does nothing" fix.
+    // Measured on the device: the browser's page translator had rebuilt the
+    // paragraphs it processed, so the spans carried the right class and
+    // data-sid and no listeners at all. Either half alone would have fixed the
+    // report; both are here because the delegation also covers extensions and
+    // reader modes, and translate="no" is correct on its own terms.
+    it('keeps the browser page translator out of the source text', () => {
+      const { html } = loadApp();
+      assert.ok(/id="text-container"[^>]*translate="no"/.test(html),
+        'the reading area must be marked untranslatable');
+      assert.ok(/id="panel-quote"[^>]*translate="no"|panel-quote notranslate/.test(html),
+        'the quoted sentence must be marked untranslatable');
+    });
+
+    it('binds sentence interaction by delegation, not per span', () => {
+      const { html } = loadApp();
+      const fn = html.slice(html.indexOf('function appendSentenceSpan'));
+      const body = fn.slice(0, fn.indexOf('\nfunction '));
+      assert.ok(!body.includes('addEventListener'),
+        'a per-span listener does not survive the span being rebuilt -- ' +
+        'wire it on #text-container in wireSentenceDelegation instead');
+      assert.includes(html, 'function wireSentenceDelegation');
+      assert.includes(html, 'wireSentenceDelegation();', 'delegation must actually be installed');
+    });
+
+    // The remote diagnostics channel exists for one purpose: debugging a phone,
+    // which has no devtools. The distributed file must never use it -- it is
+    // armed only by the endpoint server.py --debug-log injects at serve time.
+    it('ships with the diagnostics channel disarmed', () => {
+      const { get } = loadApp();
+      assert.equal(get('DEBUG_ENDPOINT'), null, 'a plain build must have no debug endpoint');
+      // And debugLog must be a no-op rather than throwing, since it is called
+      // on every sentence click.
+      assert.equal(get('debugLog')('probe', { a: 1 }), undefined);
+    });
+
     it('references only element ids that exist for every data-i18n target', () => {
       const { html, get } = loadApp();
       const I18N = get('I18N');

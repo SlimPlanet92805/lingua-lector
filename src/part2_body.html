@@ -29,7 +29,17 @@
         <button class="add-dates-btn hidden" id="btn-add-dates" data-i18n="book.addDateRange">+ 添加副标题/日期范围</button>
       </div>
       <div class="divider"></div>
-      <div id="text-container"><div id="text-columns"></div></div>
+      <!-- translate="no" + .notranslate: keep the browser's page translator out
+           of the source text. Two reasons, either sufficient. (1) It is the
+           text the reader came to read in the original -- silently replacing it
+           with a machine translation defeats the entire tool. (2) The translator
+           rebuilds the paragraphs it touches from serialized HTML, which
+           produced spans that looked right (same class, same data-sid) but had
+           no event listeners: on Android/Edge every sentence in the part of the
+           first page it had reached highlighted on tap and did nothing else.
+           The delegated click handler now survives that anyway; this stops it
+           from happening in the first place. -->
+      <div id="text-container" translate="no" class="notranslate"><div id="text-columns"></div></div>
       <div class="bottom-pager" id="bottom-pager-wrap">
         <button class="pager-prev" data-i18n="toolbar.prevPage">← 上一页</button>
         <span class="pager-status"><span class="pager-status-prefix" data-i18n="toolbar.pagerPrefix">第 </span><input type="number" class="pager-page-input" min="1" value="1" data-i18n-label="toolbar.pageInputLabel"> / <span class="pager-total">1</span><span class="pager-status-suffix" data-i18n="toolbar.pagerSuffix"> 页</span></span>
@@ -43,7 +53,8 @@
       <h2 id="panel-title" data-i18n="panel.title">句子解析</h2>
       <button class="panel-close" id="btn-close-panel" data-i18n-title="panel.closeTitle" data-i18n-label="panel.closeTitle" title="收起侧栏">→</button>
     </div>
-    <div class="panel-quote" id="panel-quote" style="display:none;"></div>
+    <!-- the sentence under analysis, quoted in the original: same reasoning -->
+    <div class="panel-quote notranslate" id="panel-quote" translate="no" style="display:none;"></div>
     <div class="panel-body" id="panel-body" aria-live="polite" aria-busy="false">
       <div class="panel-empty" id="panel-empty-msg" data-i18n="panel.emptyMsg">点击左侧正文中的任意一句，<br>这里会显示句子结构拆解和词汇讲解。</div>
     </div>
