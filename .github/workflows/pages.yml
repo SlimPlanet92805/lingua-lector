@@ -56,19 +56,19 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
+      # When GitHub's Pages backend is busy, this step can sit in
+      # deployment_queued / deployment_in_progress until it gives up after ten
+      # minutes -- and giving up *cancels* the deployment it was waiting for,
+      # so a slow spell shows up as a failed publish rather than a slow one.
+      # Nothing is wrong with the repository when that happens; re-dispatch the
+      # workflow later (`gh workflow run pages.yml --ref main`).
+      #
+      # The action's `timeout` input does not help: passing 1800000 was
+      # measured to still abort at the ten minute mark.
+      #
+      # Do NOT recover with `gh run rerun --failed`. That uploads a second
+      # artifact named github-pages into the same run, and deploy-pages then
+      # refuses outright with "Multiple artifacts named github-pages were
+      # unexpectedly found".
       - id: deployment
         uses: actions/deploy-pages@v4
-        with:
-          # The action's own default is 10 minutes, and GitHub's Pages backend
-          # can sit in deployment_queued for longer than that when it is busy.
-          # When the timeout fires the action *cancels* the deployment it was
-          # waiting for, so a slow day turns into a red run and an unpublished
-          # release even though nothing is wrong. Waiting is free; cancelling
-          # is not.
-          #
-          # If a run does fail this way, re-dispatch the workflow
-          # (`gh workflow run pages.yml --ref main`). Do NOT use
-          # `gh run rerun --failed`: that uploads a second artifact named
-          # github-pages into the same run, and deploy-pages then refuses with
-          # "Multiple artifacts named github-pages were unexpectedly found".
-          timeout: 1800000
