@@ -10,23 +10,38 @@ let totalPages = 1;
 const cache = new Map(); // cacheKey -> {grammarHtml, vocabHtml} or {error}
 let activeSpan = null;
 
-// Cache keys are content-based (chapter id + sentence text), not the plain
-// numeric sid, because sid is just a per-render counter that gets reassigned
-// every time chapters/text changes — using it directly would silently
-// invalidate (or worse, cross-wire) the persisted cache after any switch.
-function cacheKeyFor(sentenceText) {
-  const chId = currentChapter().id || 'custom';
+function sentenceHash(sentenceText) {
   let hash = 0;
   for (let i = 0; i < sentenceText.length; i++) {
     hash = ((hash << 5) - hash + sentenceText.charCodeAt(i)) | 0;
   }
-  return chId + ':' + hash;
+  return hash;
+}
+
+// Cache keys are content-based (chapter id + sentence text), not the plain
+// numeric sid, because sid is just a per-render counter that gets reassigned
+// every time chapters/text changes — using it directly would silently
+// invalidate (or worse, cross-wire) the persisted cache after any switch.
+// Takes an explicit chapterId (rather than reading currentChapter()) so it
+// also works for chapters other than the one currently on screen -- e.g. the
+// vocabulary exporter, which walks a whole document's chapters.
+function cacheKeyForChapter(sentenceText, chapterId) {
+  return (chapterId || 'custom') + ':' + sentenceHash(sentenceText);
+}
+
+function cacheKeyFor(sentenceText) {
+  return cacheKeyForChapter(sentenceText, currentChapter().id);
 }
 
 // Cache is namespaced per document as well as per chapter, so switching
-// documents never touches another document's cached analyses.
+// documents never touches another document's cached analyses. Explicit-param
+// sibling of cacheStorageKey(), for the same reason as cacheKeyForChapter().
+function cacheStorageKeyFor(docId, chapterId) {
+  return CACHE_STORAGE_PREFIX + docId + ':' + (chapterId || 'custom');
+}
+
 function cacheStorageKey() {
-  return CACHE_STORAGE_PREFIX + currentDocId + ':' + (currentChapter().id || 'custom');
+  return cacheStorageKeyFor(currentDocId, currentChapter().id);
 }
 
 // Blob storage is async (see initBlobStore), so warming can't be done inline
@@ -102,6 +117,129 @@ async function clearDocumentCache(docId) {
 
 function clearCurrentDocumentCache() {
   return clearDocumentCache(currentDocId);
+}
+
+// ============================================================
+// Vocabulary export (CSV, one row per vocab bullet across a document)
+// ============================================================
+
+// The built-in book is never written to blob storage under BOOK_DOC_ID unless
+// its chapter titles were edited (see switchToDocument()/loadInitialDocument()
+// in part3) -- a reader who just opened the app and clicked some sentences has
+// no lingua-lector-doc-book:heyking blob at all. loadDocumentContent() would
+// return null for that common case, so the built-in book is served from the
+// BOOK_CHAPTERS build constant directly, exactly like switchToDocument() does.
+async function documentContentForExport(docId) {
+  if (docId === BOOK_DOC_ID) return { bookTitle: BOOK_TITLE, chapters: BOOK_CHAPTERS };
+  return loadDocumentContent(docId);
+}
+
+// A single, un-doubled em dash -- the vocab template is `*word* — definition`
+// (buildSystemPrompt()). The structure section's clause bullets use a doubled
+// em dash ("——"), so this does not need extra guarding against matching those;
+// callers only ever run it against the isolated vocabMd half of a response
+// anyway (see collectVocabRows()).
+const VOCAB_BULLET_RE = /^-\s+\*(.+?)\*\s+—\s+(.*)$/;
+
+// Same emphasis markers inlineMd() turns into HTML, but stripped rather than
+// wrapped -- a CSV cell wants plain text, not markup.
+function stripMdEmphasis(text) {
+  return text.replace(/\*\*(.+?)\*\*/g, '$1').replace(/`(.+?)`/g, '$1').replace(/\*(.+?)\*/g, '$1');
+}
+
+function parseVocabBullets(vocabMd) {
+  const lines = (vocabMd || '').split('\n');
+  const entries = [];
+  for (const raw of lines) {
+    const m = raw.match(VOCAB_BULLET_RE);
+    if (m) {
+      entries.push({ word: stripMdEmphasis(m[1]).trim(), notes: stripMdEmphasis(m[2]).trim() });
+      continue;
+    }
+    // An indented continuation line belongs to the previous bullet (mirrors
+    // mdToHtml()'s lazy-continuation handling) rather than being dropped --
+    // in practice the prompt does not ask for wrapped vocab lines, but a model
+    // that wraps one anyway should not silently lose it.
+    if (entries.length && /^\s/.test(raw) && raw.trim()) {
+      entries[entries.length - 1].notes += ' ' + stripMdEmphasis(raw.trim());
+    }
+  }
+  return entries;
+}
+
+function toCsvField(value) {
+  const s = String(value == null ? '' : value);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function toCsvRow(fields) {
+  return fields.map(toCsvField).join(',') + '\r\n';
+}
+
+const VOCAB_CSV_HEADER = ['Word', 'Notes', 'Example sentence', 'Chapter'];
+
+function buildVocabCsv(rows) {
+  return toCsvRow(VOCAB_CSV_HEADER) + rows.map(toCsvRow).join('');
+}
+
+// Walks every chapter of a document, re-splitting its paragraphs the same way
+// rebuildParagraphSentences() does so each unit's hash can be matched against
+// whatever that chapter's persisted cache blob actually holds -- the cache key
+// is a one-way hash of the sentence text (cacheKeyForChapter()), so there is
+// no stored reverse mapping from a cached entry back to its sentence text.
+// Only chapters with a cache blob at all are re-split, which keeps this cheap
+// even for a long, mostly-unread book.
+async function collectVocabRows(docId) {
+  const content = await documentContentForExport(docId);
+  if (!content || !Array.isArray(content.chapters)) return [];
+  const rows = [];
+  for (const chapter of content.chapters) {
+    let chapterCache = null;
+    try {
+      const raw = await blobGet(cacheStorageKeyFor(docId, chapter.id));
+      chapterCache = raw ? JSON.parse(raw) : null;
+    } catch (e) { continue; }
+    if (!chapterCache) continue;
+    for (const paraText of chapter.paragraphs) {
+      const { units } = splitIntoSentenceUnits(paraText, settings.sentenceLang);
+      for (const unit of units) {
+        const entry = chapterCache[cacheKeyForChapter(unit.text, chapter.id)];
+        if (!entry || entry.error || !entry.history || !entry.history[1]) continue;
+        const { vocabMd } = splitAnalysisSections(normalizeTranslationLabel(entry.history[1].content));
+        for (const { word, notes } of parseVocabBullets(vocabMd)) {
+          rows.push([word, notes, unit.text, chapter.title || '']);
+        }
+      }
+    }
+  }
+  return rows;
+}
+
+function sanitizeFilenamePart(s) {
+  return (s || 'document').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'document';
+}
+
+function triggerCsvDownload(filename, csvText) {
+  const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function exportDocumentVocabToCsv(docId, docTitle) {
+  const title = docTitle || t('settings.libraryUntitled');
+  const rows = await collectVocabRows(docId);
+  if (!rows.length) {
+    setImportStatus(t('export.noVocabulary', { title }), 'error');
+    return;
+  }
+  triggerCsvDownload(sanitizeFilenamePart(docTitle) + '-vocab.csv', buildVocabCsv(rows));
+  setImportStatus(t('export.success', { n: rows.length, title }), 'success');
 }
 
 // Segments, not sentences: one sentence can occupy several non-adjacent
@@ -211,6 +349,7 @@ function wireSentenceDelegation() {
   root.addEventListener('click', (e) => {
     const span = sentenceAt(e.target);
     if (span) onSentenceClick(span, textFor(span));
+    else clearActiveSentence(); // tapped the margin/gap between sentences, not one of them
   });
 
   root.addEventListener('keydown', (e) => {
@@ -677,6 +816,8 @@ function renderDocLibraryList() {
       </div>
       <button class="doc-library-item-cache" title="${escapeHtml(t('settings.libraryClearCache'))}"
               aria-label="${escapeHtml(t('settings.libraryClearCache'))}">⟳</button>
+      <button class="doc-library-item-export" title="${escapeHtml(t('settings.libraryExport'))}"
+              aria-label="${escapeHtml(t('settings.libraryExport'))}">⇩</button>
       <button class="doc-library-item-delete" title="${escapeHtml(t('settings.libraryDelete'))}"
               aria-label="${escapeHtml(t('settings.libraryDelete'))}">✕</button>
     `;
@@ -689,6 +830,10 @@ function renderDocLibraryList() {
       await clearDocumentCache(entry.id);
       setImportStatus(t('cache.clearedDoc', { title: entry.title || t('settings.libraryUntitled') }), 'success');
       renderStorageUsage();
+    });
+    li.querySelector('.doc-library-item-export').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await exportDocumentVocabToCsv(entry.id, entry.title);
     });
     li.querySelector('.doc-library-item-delete').addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -792,10 +937,77 @@ function wireKeyboardShortcuts() {
 // Panel toggle
 // ============================================================
 const panelEl = document.getElementById('panel');
+
+// Shared by "close the panel" and "tap blank space in the reader" -- both mean
+// the reader is done with that sentence, so the highlight left glowing after
+// either one would be stale, not a record of what's still being discussed.
+function clearActiveSentence() {
+  if (!activeSpan) return;
+  spansForSentence(activeSpan.dataset.sid).forEach((el) => el.classList.remove('active'));
+  activeSpan = null;
+}
+
 function togglePanel() {
   panelEl.classList.toggle('collapsed');
   const btn = document.getElementById('btn-toggle-panel');
-  btn.textContent = panelEl.classList.contains('collapsed') ? t('toolbar.showSidebar') : t('toolbar.hideSidebar');
+  const collapsed = panelEl.classList.contains('collapsed');
+  btn.textContent = collapsed ? t('toolbar.showSidebar') : t('toolbar.hideSidebar');
+  if (collapsed) clearActiveSentence();
+}
+
+// ============================================================
+// Bottom-sheet drag (the panel's mobile-portrait layout only -- landscape
+// and desktop keep the fixed-width sidebar, where dragging a height makes no
+// sense). Freeform, no snap points: the grip just moves panelEl's own height
+// between a floor and a near-fullscreen ceiling, and releasing it below the
+// floor dismisses the panel the same way the close button does, rather than
+// leaving it stuck open at a sliver.
+// ============================================================
+const PANEL_SHEET_QUERY = '(max-width: 900px) and (orientation: portrait)';
+function isPanelSheet() {
+  return window.matchMedia(PANEL_SHEET_QUERY).matches;
+}
+
+function wirePanelDrag() {
+  const grip = document.getElementById('panel-grip');
+  if (!grip) return;
+  let dragging = false;
+  let startY = 0;
+  let startHeight = 0;
+
+  grip.addEventListener('pointerdown', (e) => {
+    if (!isPanelSheet()) return;
+    dragging = true;
+    startY = e.clientY;
+    startHeight = panelEl.getBoundingClientRect().height;
+    grip.setPointerCapture(e.pointerId);
+  });
+
+  grip.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const deltaY = startY - e.clientY; // dragging up shortens deltaY's sign, growing the panel
+    const minHeight = window.innerHeight * 0.32;
+    const maxHeight = window.innerHeight * 0.94;
+    panelEl.style.height = Math.min(maxHeight, Math.max(minHeight, startHeight + deltaY)) + 'px';
+  });
+
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    if (panelEl.getBoundingClientRect().height <= window.innerHeight * 0.34) {
+      panelEl.style.height = ''; // back to the CSS default for next time
+      if (!panelEl.classList.contains('collapsed')) togglePanel();
+    }
+  }
+  grip.addEventListener('pointerup', endDrag);
+  grip.addEventListener('pointercancel', endDrag);
+
+  // Rotating to landscape (or resizing past the breakpoint) while a drag has
+  // left an inline pixel height behind must not leave that height fighting
+  // the sidebar layout's own CSS afterwards.
+  window.matchMedia(PANEL_SHEET_QUERY).addEventListener('change', (e) => {
+    if (!e.matches) panelEl.style.height = '';
+  });
 }
 
 // ============================================================
@@ -807,9 +1019,7 @@ async function onSentenceClick(span, sentenceText) {
   debugLog('onSentenceClick', { sid: span.dataset.sid, page: currentPage, len: sentenceText.length });
   // A sentence interrupted by a footnote is rendered as several spans; the
   // whole sentence must light up, not just the half that was clicked.
-  if (activeSpan) {
-    spansForSentence(activeSpan.dataset.sid).forEach((el) => el.classList.remove('active'));
-  }
+  clearActiveSentence();
   spansForSentence(span.dataset.sid).forEach((el) => el.classList.add('active'));
   activeSpan = span;
 
@@ -1186,9 +1396,10 @@ ${transLabel}〈这里填这句话完整、通顺、自然的整句翻译〉
      这个标签同样必须一字不差地写成 ${transLabel}。
 - **判定「是不是从句」只有一条标准：这个结构里有没有属于它自己的定式动词（随主语变位的那种动词）。** 没有定式动词的成分一律不是从句，必须用它自己的名称称呼：
   - 带扩展成分的分词定语／形容词定语（如德语 *die ihnen plötzlich gegebenen freien Staatsformen* 里的 *ihnen plötzlich gegebenen*）叫「分词定语（扩展定语）」，**不是**关系从句，也不要说成「省略了关系代词的定语从句」；
-  - zu + 不定式的结构叫「不定式短语」；介词短语、同位语、独立分词结构同理。
+  - zu + 不定式的结构叫「不定式短语」；介词短语、同位语、独立分词结构同理；
+  - 拉丁语独立夺格结构（ablativus absolutus，如 *urbe capta*「城破之后」）没有定式动词，叫「独立夺格」，不是状语从句，即使译成"当……时候"也不能改叫从句；间接引语的宾格+不定式结构（accusativus cum infinitivo，AcI）同样没有定式动词，叫「宾格不定式结构（AcI）」，功能上相当于宾语从句但本身不是从句；动名词/动词性形容词结构（gerundium／gerundivum）同理不是从句。
   拿不准时宁可写「这里没有从句，只有一个扩展定语」，也不要把没有定式动词的成分称作从句。
-- **从句的名称要用被分析语言自己的语法体系里的术语，不要笼统地套用英语语法的说法。** 由关系代词／关系副词引导的从句（德语 Relativsatz：*der/die/das*、*welcher*、*wo*、*was*…；法语 proposition relative；俄语 определительное придаточное 等）一律叫**关系从句**；「定语从句」是英语语法的叫法，而且只描述了它最常见的那一种功能——关系从句也可以不作定语（如德语的自由关系从句 *Wer das sagt, irrt sich.* 整个从句作主语），这时更不能叫定语从句。要说明它在句中的功能就单独说（「作 *Paraguay* 的后置定语」），别把功能塞进名称里。其它类型同理：状语从句要进一步说清是时间／原因／让步／条件等哪一种。
+- **从句的名称要用被分析语言自己的语法体系里的术语，不要笼统地套用英语语法的说法。** 由关系代词／关系副词引导的从句（德语 Relativsatz：*der/die/das*、*welcher*、*wo*、*was*…；法语 proposition relative；俄语 определительное придаточное；拉丁语由 *qui/quae/quod* 等关系代词引导的从句等）一律叫**关系从句**；「定语从句」是英语语法的叫法，而且只描述了它最常见的那一种功能——关系从句也可以不作定语（如德语的自由关系从句 *Wer das sagt, irrt sich.* 整个从句作主语），这时更不能叫定语从句。要说明它在句中的功能就单独说（「作 *Paraguay* 的后置定语」），别把功能塞进名称里。其它类型同理：状语从句要进一步说清是时间／原因／让步／条件等哪一种。
 - 动词的**语气／形态**（如德语第一虚拟式 Konjunktiv I 表转述、第二虚拟式 Konjunktiv II 表非现实或委婉）是谓语的形态，**不是从句的类型**：先按功能定类型（关系从句／状语从句／宾语从句…），语气单独作为一条说明它在这里表达什么。
 - 如果句子里有插入语、同位语、分词结构或省略成分，也请指出；其中自成意群的部分（如同位语、插入语）同样先照抄原文，再按上面的模板附上 ${transLabel} 一行。
 - 保持简洁，用列点呈现，不要写成大段散文。
@@ -1198,6 +1409,7 @@ ${transLabel}〈这里填这句话完整、通顺、自然的整句翻译〉
 - 极其重要：词条只能从【用户要求分析的这一句话本身】中挑选，禁止选取仅出现在你收到的上下文段落、但没有出现在这句话原文里的词/短语——上下文段落只是用来帮你理解代词指代和前后文关系的背景资料，不是分析对象。如果不确定某个词是否真的出现在目标句子里，就不要列出它。
 - 每个词条格式：*原词* — 释义，然后**只**按这个词自己的词性附加下面对应的一条信息。
   - 每个词条只属于一个词性。不属于的那些类别**整条略去、一个字都不要写**，禁止出现「动词：不适用」「无比较级」「N/A」「—」这类占位说明，也不要生造不存在的变化形式。
+  - **「原词」写的是这个词的词典引用形式（词典原形），不是它在原句里出现的屈折/变位形式**，两者不一致时以原形为准：动词写不定式（分离动词要把分离前缀合并回去——原句写的是被拆开的变位形式 *nahmen … aus*，词条仍要写成原形 *ausnehmen*，不要写变位形式，也不要漏掉前缀）；名词写主格单数；形容词写原级（比较级/最高级要还原）。原句里那个具体屈折形式如果本身值得一提（不规则变位、罕见的格等），放进释义里说明，不要让词条本身停在屈折形式上。
   - 名词：给出该语言的语法性，并且**只写这个词实际的那一个定冠词**。德语的定冠词是 der、die、das 三者之一，必须三选一：Erdbeben 是中性，就只写 das，写成「der/das」或列出多个是错的。（法语、俄语等按该语言的阳性/阴性/中性体例；中文、英文等没有语法性的语言，这一项整条略去。）此外给出复数形式。
   - 动词：标出该语言里对识别这个词有帮助的核心变位形式（例如德语给出第三人称单数现在时、过去式 Präteritum、过去分词 Partizip II 三种形式；其他语言按该语言惯例给出对应的原形/变位提示）。
   - 形容词等其他词性：如有值得注意的变格/比较级等形式也可以简要补充，没有就不提。

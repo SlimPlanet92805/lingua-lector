@@ -49,9 +49,13 @@
   </div>
 
   <div class="panel" id="panel" role="region" aria-labelledby="panel-title">
-    <div class="panel-header">
+    <div class="panel-header" id="panel-header">
+      <!-- Drag-to-resize / drag-to-dismiss grip. Only active as a bottom-sheet
+           on narrow portrait screens (see wirePanelDrag() in part6); harmless,
+           unstyled and inert everywhere else. -->
+      <div class="panel-grip" id="panel-grip" aria-hidden="true"></div>
       <h2 id="panel-title" data-i18n="panel.title">句子解析</h2>
-      <button class="panel-close" id="btn-close-panel" data-i18n-title="panel.closeTitle" data-i18n-label="panel.closeTitle" title="收起侧栏">→</button>
+      <button class="panel-close" id="btn-close-panel" data-i18n-title="panel.closeTitle" data-i18n-label="panel.closeTitle" title="收起侧栏"><span class="panel-close-icon-side">→</span><span class="panel-close-icon-sheet">↓</span></button>
     </div>
     <!-- the sentence under analysis, quoted in the original: same reasoning -->
     <div class="panel-quote notranslate" id="panel-quote" translate="no" style="display:none;"></div>

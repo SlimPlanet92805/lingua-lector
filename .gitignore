@@ -1,0 +1,16 @@
+# Scratch output of scripts/make-demo-gif.py, cleaned up on success.
+dist/_demo_frames/
+
+# Editor / OS / tooling noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
+__pycache__/
+*.py[cod]
+node_modules/
+*.log
+.claude/

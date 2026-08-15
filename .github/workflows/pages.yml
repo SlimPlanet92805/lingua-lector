@@ -45,8 +45,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # dist/lingua-lector.html is committed, so there is nothing to build.
-      # Pages serves index.html for the site root, hence the rename.
+      # Deploy gate: rebuild from src/ and run the test suite before anything
+      # gets published. Also confirms the committed dist/lingua-lector.html
+      # (what actually gets served below) matches what src/ produces right
+      # now -- src/ and dist/ can silently drift otherwise, since committing
+      # built output is how this repo ships. See .github/workflows/ci.yml for
+      # the broader, path-filter-free version of this same check.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: python build.py
+      - run: node tests/run.js
+      - run: git diff --exit-code dist/
+
+      # dist/lingua-lector.html is committed, so there is nothing left to
+      # build for deploy itself. Pages serves index.html for the site root,
+      # hence the rename.
       - name: Assemble site
         run: |
           mkdir -p _site

@@ -554,6 +554,7 @@ function installDebugProbes() {
 // ============================================================
 document.getElementById('btn-close-panel').addEventListener('click', togglePanel);
 document.getElementById('btn-toggle-panel').addEventListener('click', togglePanel);
+wirePanelDrag();
 
 (async function init() {
   loadSettingsFromLocalStorage();

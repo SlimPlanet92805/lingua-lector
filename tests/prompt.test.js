@@ -93,6 +93,37 @@ module.exports = ({ describe, it, assert }) => {
       assert.ok(/Relativsatz/.test(prompt), 'prompt should name the German term');
     });
 
+    // Latin is in the sentence-splitting language list but had no
+    // language-specific terminology in the prompt: a model left to guess would
+    // reach for the nearest English/German label ("temporal clause") for
+    // constructs that have no finite verb at all, exactly the mistake rule 3
+    // already guards against for German's extended participial attribute.
+    it('names Latin non-finite constructions instead of calling them clauses', () => {
+      const { get } = loadApp();
+      const prompt = get('buildSystemPrompt')();
+      assert.ok(/独立夺格/.test(prompt), 'prompt must name the ablative absolute');
+      assert.ok(/ablativus absolutus/.test(prompt), 'prompt should give the Latin term');
+      assert.ok(/accusativus cum infinitivo|AcI/.test(prompt),
+        'prompt must name the accusative-and-infinitive (indirect statement) construction');
+      assert.ok(/gerundium/.test(prompt) && /gerundivum/.test(prompt),
+        'prompt must name gerund and gerundive');
+    });
+
+    // Observed inconsistency: for a source clause using the separated
+    // preterite of a separable verb, the model sometimes gave back the
+    // inflected surface string and sometimes correctly reassembled the
+    // dictionary form -- nothing in the prompt actually said which one was
+    // wanted, so "原词" ("the original word") was read either way.
+    it('requires the vocab headword to be the dictionary form, not the inflected one', () => {
+      const { get } = loadApp();
+      const prompt = get('buildSystemPrompt')();
+      assert.ok(/词典引用形式|词典原形/.test(prompt), 'prompt must call for the dictionary/citation form');
+      assert.ok(/不是它在原句里出现的屈折/.test(prompt),
+        'prompt must explicitly rule out the inflected surface form');
+      assert.ok(/nahmen … aus/.test(prompt) && /ausnehmen/.test(prompt),
+        'prompt should carry a worked example of reassembling a separable verb');
+    });
+
     it('defines a subordinate clause by its finite verb', () => {
       const { get } = loadApp();
       const prompt = get('buildSystemPrompt')();

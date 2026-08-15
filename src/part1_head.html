@@ -4,6 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title data-i18n="app.title">Lingua Lector — 交互式外语精读阅读器</title>
+<meta property="og:title" content="Lingua Lector — AI Clause-by-Clause Close Reading">
+<meta property="og:description" content="An AI clause-by-clause close-reader for people reading long, hard sentences in the original — single HTML file, bring your own API key, your books and data stay on your machine.">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Lingua Lector — AI Clause-by-Clause Close Reading">
+<meta name="twitter:description" content="An AI clause-by-clause close-reader for people reading long, hard sentences in the original — single HTML file, bring your own API key, your books and data stay on your machine.">
 <!--
   Favicon, inline as a data URI so the single-file promise holds. It is the
   product in sixteen pixels: a page of text with ONE SENTENCE lit up, wrapping
@@ -359,7 +365,8 @@
   .doc-library-item-title { font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .doc-library-item-meta { font-size: 11px; color: var(--ink-soft); }
   .doc-library-item-delete,
-  .doc-library-item-cache {
+  .doc-library-item-cache,
+  .doc-library-item-export {
     border: none;
     background: none;
     color: var(--ink-soft);
@@ -370,7 +377,8 @@
     flex-shrink: 0;
   }
   .doc-library-item-delete:hover { background: var(--danger-bg); color: var(--danger); }
-  .doc-library-item-cache:hover { background: var(--rule); color: var(--accent); }
+  .doc-library-item-cache:hover,
+  .doc-library-item-export:hover { background: var(--rule); color: var(--accent); }
 
   .toolbar {
     max-width: 800px;
@@ -590,6 +598,18 @@
     border-radius: 6px;
   }
   .panel-close:hover { background: var(--rule); }
+  /* Which arrow makes sense depends on where the panel lives: it slides in
+     from the side as a sidebar (→ collapses it rightward) but up from the
+     bottom as a mobile sheet (↓ dismisses it downward) -- an arrow pointing
+     the wrong way for how the panel actually moves reads as broken. Default
+     to the sidebar glyph; the portrait bottom-sheet breakpoint swaps which
+     one is visible. */
+  .panel-close-icon-sheet { display: none; }
+
+  /* Drag handle for the bottom-sheet layout. Invisible and inert outside it
+     (no touch-action override, no listeners attached -- see wirePanelDrag()
+     in part6, which itself no-ops outside the portrait breakpoint). */
+  .panel-grip { display: none; }
 
   .panel-quote {
     padding: 16px 22px;
@@ -960,17 +980,77 @@
   .import-status.success { color: var(--success-ink); }
 
   @media (max-width: 900px) {
-    .app { flex-direction: column; }
-    .panel {
-      flex: none; max-width: none; width: 100%; height: 55vh;
-      border-left: none; border-top: 1px solid var(--rule); order: 2;
-    }
-    .panel.collapsed { height: 0; flex: none; max-width: none; width: 100%; }
-    .reader-wrap { order: 1; height: auto; flex: 1 1 auto; }
     .reader-inner { padding: 20px 20px 106px; }
     .bottom-pager { left: 20px; right: 20px; }
     p.para { font-size: 18px; }
     .toolbar { padding: 12px 20px 0; max-width: none; }
+  }
+
+  /* Portrait phones/tablets: the panel becomes a bottom sheet. Landscape at
+     the same width keeps the sidebar (see the landscape block below) -- a
+     capped-height sheet on a short landscape viewport left no headroom for
+     its own tab bar, which is why that case is split out instead of sharing
+     this one. */
+  @media (max-width: 900px) and (orientation: portrait) {
+    .app { flex-direction: column; }
+    .panel {
+      flex: none; max-width: none; width: 100%; height: 82vh;
+      border-left: none; border-top: 1px solid var(--rule); order: 2;
+      /* The panel itself is now the one scroll container (see below), so its
+         height can be driven directly by drag -- see wirePanelDrag(). */
+      overflow-y: auto;
+    }
+    .panel.collapsed { height: 0; flex: none; max-width: none; width: 100%; }
+    .reader-wrap { order: 1; height: auto; flex: 1 1 auto; }
+
+    .panel-close-icon-side { display: none; }
+    .panel-close-icon-sheet { display: inline; }
+
+    .panel-grip {
+      display: block;
+      width: 36px; height: 4px;
+      margin: 8px auto 0;
+      border-radius: 2px;
+      background: var(--rule);
+      touch-action: none; /* the handle owns vertical drags; no scroll-chaining fight */
+    }
+
+    /* The header's job here is just "grip + title + dismiss", so it can be
+       much smaller than the sidebar version -- padding, not font tricks, is
+       most of what made it feel oversized. Sticky rather than a plain
+       non-scrolling block: with the quote now part of the scrolling content
+       below (next rule), something has to stay reachable at the top. */
+    .panel-header {
+      position: sticky; top: 0; z-index: 3;
+      background: var(--panel-bg);
+      padding: 2px 14px 6px;
+    }
+    .panel-header h2 { font-size: 12px; }
+    .panel-close { min-height: 40px; min-width: 40px; padding: 6px; }
+
+    /* The quoted sentence used to be a fixed block permanently above the
+       scroll area -- fine for a short sentence, but this tool's whole reason
+       to exist is sentences that are NOT short, and a 900-character quote ate
+       most of a phone screen before any analysis was visible at all. It now
+       scrolls away with everything else instead of claiming a permanent slice
+       of a screen that's already small. */
+    .panel-quote { padding: 8px 16px; font-size: 14.5px; }
+
+    /* .panel is the scroll container now, not this -- see .panel above. */
+    .panel-body { flex: none; overflow-y: visible; }
+
+    /* Was sticky to stay reachable inside a cramped independent scroll area;
+       that constraint is gone now that the whole sheet can be dragged tall,
+       so it can just scroll past like the rest of the content instead of
+       needing a second sticky offset stacked under the header. */
+    .section-tabs { position: static; }
+  }
+
+  /* Landscape phones: more width than height to spare, so this keeps the
+     sidebar layout instead of a bottom sheet -- narrower than the desktop
+     420px so the reader keeps more than half the screen. */
+  @media (max-width: 900px) and (orientation: landscape) {
+    .panel { flex: 0 0 44%; max-width: 340px; }
   }
 
   /* Phones. The 900px rules above already stack the panel under the reader;
@@ -993,8 +1073,11 @@
        column: at 1.95 roughly half the vertical travel missed the text. */
     p.para { font-size: 17px; }
 
-    /* 44px is the smallest reliably tappable target. */
-    .pager-prev, .pager-next, .btn, .panel-close, .modal-close {
+    /* 44px is the smallest reliably tappable target. .panel-close is sized
+       separately in the portrait bottom-sheet rules above -- stacking this
+       padding on top of that rule's own is exactly the "header is too bulky"
+       complaint that motivated shrinking it in the first place. */
+    .pager-prev, .pager-next, .btn, .modal-close {
       min-height: 44px;
       padding-top: 10px;
       padding-bottom: 10px;
@@ -1026,11 +1109,6 @@
     /* The hint advertises "← → to turn pages, Esc to close" -- keyboard advice
        on a device with no keyboard. */
     .toolbar .hint { display: none; }
-
-    /* Roomy enough to read an analysis in without scrolling constantly. It
-       only applies once a sentence has been tapped: the panel starts
-       collapsed on phones (see init), so the reader gets the whole screen. */
-    .panel { height: 60vh; }
 
     .toc-sidebar { width: 86vw; }
 

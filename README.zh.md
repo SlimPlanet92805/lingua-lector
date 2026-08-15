@@ -32,7 +32,7 @@
 ## 缘起
 
 这本书里的句子很长。一个主句能套住 `nachdem` 状语从句、里面再叠两层 `daß` 宾语从句、顺手插进两个
-同位语和两个关系从句，写到近九百个字符都还没并列过一次（见文末「一个例子」——纪录保持者出自编者
+同位语和两个关系从句，写到近九百个字符都还没并列过一次（紧接下面这个就是纪录保持者，出自编者
 Grete Litzmann 的导言，von Heyking 本人也没客气到哪里去）。1926 年出版的这本日记通篇如此：一位德国
 外交官夫人从瓦尔帕莱索写到加尔各答、开罗、北京、墨西哥，用的是一个世纪前的德语。
 
@@ -41,6 +41,27 @@ Grete Litzmann 的导言，von Heyking 本人也没客气到哪里去）。1926 
 
 这个工具就是为了消掉那十次停顿：点一句话，右边告诉你骨架怎么拆、每个从句在说什么、哪些词值得记，
 然后你接着读。写完发现需要这么读的不止这一本书，它就长成了一个通用精读器，适用于任何拉丁字母文本。
+
+## 一个例子
+
+书中最长的单句之一，出自编者所写的导言：
+
+> Nach einjährigem Urlaub, den das Paar in völliger Stille in Florenz verlebt, nimmt er
+> schweren Herzens eine Anstellung als stellvertretender Konsul in New York an, nachdem
+> Freunde im Auswärtigen Amt in Berlin ihm versichert haben, daß seinem Übergang aus der
+> Konsulatskarriere in den eigentlichen diplomatischen Dienst bei allernächster Gelegenheit
+> nichts im Wege stände; ein verhängnisvoller Irrtum, bei dem für jeden, dem die Verhältnisse
+> im diplomatischen Dienst in den achtziger Jahren bekannt sind, die Vermutung naheliegt,
+> dieser freundschaftliche Rat sei, den Gebern vielleicht selbst nicht bewußt, mit davon
+> beeinflußt gewesen, daß Heykings Ausscheiden aus dem Amt in Berlin seine Freunde der
+> Aufgabe überhob, sich öffentlich zu ihm zu bekennen, eine Aufgabe, die allerdings
+> angesichts des höfischen Einflusses seiner Gegner ein großes Maß von Selbständigkeit
+> erfordert hätte!
+
+一个主句，一个 `nachdem` 状语从句，两层 `daß` 宾语从句，两处同位语，两个关系从句，全靠层层修饰撑起
+近九百字符。工具拆给你看的就是这个：
+
+![最长句的解析结果](docs/longest-sentence-analysis.png)
 
 ## 特性
 
@@ -271,27 +292,6 @@ python3 build.py && node tests/run.js
 | `pdf-layout.test.js` | PDF 行合并、段落切分、标题启发式（用内置全书验证召回，用真实误判样本验证排除） |
 | `prompt.test.js` | 系统提示词字面量、译文标签兜底改写、章节切分容错、供应商默认模型 |
 | `a11y.test.js` | 语种标注、键盘可达性、live region 与弹窗语义、图标按钮可访问名称、主题对比度 |
-
-## 一个例子
-
-书中最长的单句之一，出自编者所写的导言：
-
-> Nach einjährigem Urlaub, den das Paar in völliger Stille in Florenz verlebt, nimmt er
-> schweren Herzens eine Anstellung als stellvertretender Konsul in New York an, nachdem
-> Freunde im Auswärtigen Amt in Berlin ihm versichert haben, daß seinem Übergang aus der
-> Konsulatskarriere in den eigentlichen diplomatischen Dienst bei allernächster Gelegenheit
-> nichts im Wege stände; ein verhängnisvoller Irrtum, bei dem für jeden, dem die Verhältnisse
-> im diplomatischen Dienst in den achtziger Jahren bekannt sind, die Vermutung naheliegt,
-> dieser freundschaftliche Rat sei, den Gebern vielleicht selbst nicht bewußt, mit davon
-> beeinflußt gewesen, daß Heykings Ausscheiden aus dem Amt in Berlin seine Freunde der
-> Aufgabe überhob, sich öffentlich zu ihm zu bekennen, eine Aufgabe, die allerdings
-> angesichts des höfischen Einflusses seiner Gegner ein großes Maß von Selbständigkeit
-> erfordert hätte!
-
-一个主句，一个 `nachdem` 状语从句，两层 `daß` 宾语从句，两处同位语，两个关系从句，全靠层层修饰撑起
-近九百字符。工具拆给你看的就是这个：
-
-![最长句的解析结果](docs/longest-sentence-analysis.png)
 
 ## 致谢
 

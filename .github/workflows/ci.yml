@@ -1,0 +1,33 @@
+# Build + test gate. Runs on every push and PR, not just ones touching
+# dist/lingua-lector.html -- a push that only changes src/ and forgets to run
+# build.py needs to be caught too, so this has no path filter.
+#
+# This is deliberately a separate, broader-triggering workflow from
+# pages.yml. The actual deploy gate lives inline in pages.yml's own job
+# (cross-workflow `needs:` isn't a thing in GitHub Actions, and a
+# workflow_run trigger would add ref/timing complexity for no benefit here).
+# This workflow exists for visibility: a red X on a PR, or on a commit that
+# only touched src/ and never triggers pages.yml at all.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: python build.py
+      - run: node tests/run.js
+      # The committed dist/lingua-lector.html must equal what src/ builds
+      # right now -- catches "edited src/, forgot to rebuild" and "hand-
+      # edited dist/ directly".
+      - run: git diff --exit-code dist/

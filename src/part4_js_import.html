@@ -645,17 +645,50 @@ function flattenEpubToc(items, out) {
   return out;
 }
 
-function extractParagraphsFromEpubDoc(doc) {
-  const blocks = doc.querySelectorAll('p, li, blockquote, h1, h2, h3, h4, h5, h6');
+const EPUB_BLOCK_SELECTOR = 'p, li, blockquote, h1, h2, h3, h4, h5, h6';
+
+function blocksToParagraphs(blocks) {
   const paragraphs = [];
   blocks.forEach(el => {
     const text = el.textContent.replace(/\s+/g, ' ').trim();
     if (text) paragraphs.push(text);
   });
+  return paragraphs;
+}
+
+function extractParagraphsFromEpubDoc(doc) {
+  const paragraphs = blocksToParagraphs(doc.querySelectorAll(EPUB_BLOCK_SELECTOR));
   if (paragraphs.length) return paragraphs;
   // fallback for chapters with no recognizable block structure at all
   const text = ((doc.body && doc.body.textContent) || doc.textContent || '').trim();
   return text ? textToParagraphs(text) : [];
+}
+
+// Where among `blocks` does a TOC entry's #fragment anchor land? Gutenberg's
+// converter (and others) commonly emit an empty `<a id="...">` marker
+// immediately before the heading it labels, rather than putting the id on the
+// heading itself -- so the anchor is often not one of the extracted blocks at
+// all, just a sibling pointing at where the next one starts. compareDocumentPosition
+// finds the first block that comes at or after the anchor in document order,
+// which covers both that case and the anchor-is-the-block-itself case.
+function findAnchorBlockIndex(doc, blocks, fragment) {
+  // Plain attribute-selector lookups rather than getElementById(): epub.js
+  // hands back an XML document for application/xhtml+xml content, and
+  // getElementById() on an XML document is unreliable (it depends on a DTD
+  // declaring the attribute as type ID, which these documents don't have) --
+  // some environments don't even expose the method on that document type.
+  let anchor = null;
+  try {
+    const esc = CSS.escape(fragment);
+    anchor = doc.querySelector(`[id="${esc}"]`) || doc.querySelector(`a[name="${esc}"]`);
+  } catch (e) { /* fragment not usable as a selector value; treat as unresolvable */ }
+  if (!anchor) return 0; // unresolvable anchor: fall back to "whole file", the old behaviour
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    if (block === anchor || block.contains(anchor)) return i;
+    if (anchor.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING) return i;
+  }
+  return blocks.length; // anchor sits after every extracted block
 }
 
 function withTimeout(promise, ms, errorMessage) {
@@ -665,6 +698,18 @@ function withTimeout(promise, ms, errorMessage) {
   ]);
 }
 
+// A single spine file is very often pointed at by SEVERAL TOC entries, each
+// anchored to a different heading inside it -- Gutenberg's epub converter in
+// particular does this for shorter books, one entry per in-page anchor rather
+// than one per file. Naively loading "the file for this entry" per entry (the
+// previous implementation) grabbed the WHOLE file every time, so a book with
+// one file and eleven TOC entries came out as eleven "chapters" each holding
+// an identical copy of the entire file -- an 8x-plus content duplication, and
+// entries pointing at a heading deep in the file (a "full license text"
+// heading near the very end, in the pathological case where a whole short
+// story has only ONE TOC entry at all) had the real content in front of that
+// heading silently mislabelled under it instead of split out. Grouping by
+// file first and slicing between consecutive anchors' positions fixes both.
 async function extractEpubChapters(arrayBuffer) {
   if (!window.ePub) throw new Error(t('import.epubjsFail'));
   const book = window.ePub(arrayBuffer);
@@ -679,26 +724,88 @@ async function extractEpubChapters(arrayBuffer) {
     ? tocEntries
     : book.spine.items.map(item => ({ href: item.href, label: '' }));
 
+  // base href (fragment stripped) -> the TOC entries that resolve to it, each
+  // keeping its own #fragment and its original position for ordering.
+  const byHref = new Map();
+  sections.forEach((entry, order) => {
+    const hashIdx = entry.href.indexOf('#');
+    const base = hashIdx === -1 ? entry.href : entry.href.slice(0, hashIdx);
+    const fragment = hashIdx === -1 ? null : entry.href.slice(hashIdx + 1);
+    if (!byHref.has(base)) byHref.set(base, []);
+    byHref.get(base).push({ label: entry.label, fragment, order });
+  });
+
   const chapters = [];
-  let idx = 0;
-  for (const entry of sections) {
-    idx++;
-    const section = book.spine.get(entry.href);
+  for (const [href, entries] of byHref) {
+    const section = book.spine.get(href);
     if (!section) continue;
-    let paragraphs = [];
+    let doc;
     try {
-      const doc = await section.load(book.load.bind(book));
-      paragraphs = extractParagraphsFromEpubDoc(doc);
+      doc = await section.load(book.load.bind(book));
+    } catch (e) {
+      continue;
+    }
+    try {
+      const blocks = Array.from(doc.querySelectorAll(EPUB_BLOCK_SELECTOR));
+      if (!blocks.length) {
+        // No block structure to slice by at all -- keep the old whole-file
+        // fallback, filed once under the group's first label.
+        const paragraphs = extractParagraphsFromEpubDoc(doc);
+        if (paragraphs.length) {
+          chapters.push({
+            id: 'epub-' + entries[0].order,
+            title: entries[0].label || (metadata && metadata.title) || '',
+            dateRange: '',
+            paragraphs,
+          });
+        }
+        continue;
+      }
+
+      const withPos = entries
+        .map(e => ({ ...e, blockIndex: e.fragment ? findAnchorBlockIndex(doc, blocks, e.fragment) : 0 }))
+        .sort((a, b) => a.blockIndex - b.blockIndex || a.order - b.order);
+
+      // Content before this file's first resolved anchor belongs to no TOC
+      // entry in this file. Two different situations produce that, and they
+      // need opposite handling:
+      //   - a chapter's content runs across a file boundary (its anchor sits
+      //     near the start of the PREVIOUS file, so this file opens with the
+      //     tail end of that same chapter, unlabelled) -- that has to extend
+      //     the chapter already in progress, not start a new one, or a
+      //     multi-file chapter gets truncated to almost nothing at the point
+      //     it crosses files;
+      //   - nothing has been emitted yet at all (this is the very first
+      //     content in the book, e.g. front matter before the first heading)
+      //     -- that legitimately has no chapter to extend, so it becomes its
+      //     own untitled leading chapter, same as the single-navpoint case
+      //     (a lone heading anchored deep in the file, e.g. a license
+      //     section, with the real content in front of it never referenced
+      //     by any TOC entry).
+      if (withPos[0].blockIndex > 0) {
+        const lead = blocksToParagraphs(blocks.slice(0, withPos[0].blockIndex));
+        if (lead.length) {
+          const prevChapter = chapters[chapters.length - 1];
+          if (prevChapter) prevChapter.paragraphs = prevChapter.paragraphs.concat(lead);
+          else chapters.push({ id: 'epub-lead-' + href, title: '', dateRange: '', paragraphs: lead });
+        }
+      }
+
+      for (let i = 0; i < withPos.length; i++) {
+        const start = withPos[i].blockIndex;
+        const end = i + 1 < withPos.length ? withPos[i + 1].blockIndex : blocks.length;
+        const paragraphs = blocksToParagraphs(blocks.slice(start, end));
+        if (!paragraphs.length) continue;
+        chapters.push({
+          id: 'epub-' + withPos[i].order,
+          title: withPos[i].label || (metadata && metadata.title) || '',
+          dateRange: '',
+          paragraphs,
+        });
+      }
     } finally {
       if (section.unload) section.unload();
     }
-    if (!paragraphs.length) continue;
-    chapters.push({
-      id: 'epub-' + idx,
-      title: entry.label || (metadata && metadata.title) || '',
-      dateRange: '',
-      paragraphs,
-    });
   }
   if (!chapters.length) throw new Error(t('import.noText'));
   return { bookTitle: (metadata && metadata.title) || '', chapters };

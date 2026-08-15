@@ -36,10 +36,10 @@ example book, and can be deleted.
 This book is written in long sentences. One main clause can hold a `nachdem` adverbial
 clause, stack two layers of `daß` object clauses inside it, and take on two appositions and
 two relative clauses along the way, running to nearly nine hundred characters without
-coordinating once (see "One example" at the bottom — the record holder comes from the
-introduction by the book's editor, Grete Litzmann, and von Heyking herself is not much
-gentler). The 1926 volume reads like that throughout: a German diplomat's wife writing from
-Valparaíso, Calcutta, Cairo, Peking and Mexico, in century-old German.
+coordinating once (the record holder, shown just below, comes from the introduction by the
+book's editor, Grete Litzmann, and von Heyking herself is not much gentler). The 1926 volume
+reads like that throughout: a German diplomat's wife writing from Valparaíso, Calcutta,
+Cairo, Peking and Mexico, in century-old German.
 
 Which makes reading it go: read a sentence, stop, look a word up, untangle the clauses,
 realise you've forgotten how the sentence started, go back, re-read, move on. Ten stops a page.
@@ -48,6 +48,28 @@ This tool exists to remove those ten stops: click a sentence, and the panel tell
 it's built, what each clause says, and which words are worth remembering. Then you read on.
 It turned out other books needed this too, so it grew into a general close-reading tool for
 any Latin-alphabet text.
+
+## One example
+
+One of the longest single sentences in the book, from the editor's introduction:
+
+> Nach einjährigem Urlaub, den das Paar in völliger Stille in Florenz verlebt, nimmt er
+> schweren Herzens eine Anstellung als stellvertretender Konsul in New York an, nachdem
+> Freunde im Auswärtigen Amt in Berlin ihm versichert haben, daß seinem Übergang aus der
+> Konsulatskarriere in den eigentlichen diplomatischen Dienst bei allernächster Gelegenheit
+> nichts im Wege stände; ein verhängnisvoller Irrtum, bei dem für jeden, dem die Verhältnisse
+> im diplomatischen Dienst in den achtziger Jahren bekannt sind, die Vermutung naheliegt,
+> dieser freundschaftliche Rat sei, den Gebern vielleicht selbst nicht bewußt, mit davon
+> beeinflußt gewesen, daß Heykings Ausscheiden aus dem Amt in Berlin seine Freunde der
+> Aufgabe überhob, sich öffentlich zu ihm zu bekennen, eine Aufgabe, die allerdings
+> angesichts des höfischen Einflusses seiner Gegner ein großes Maß von Selbständigkeit
+> erfordert hätte!
+
+One main clause, a `nachdem` adverbial clause, two layers of `daß` object clauses, two
+appositions, two relative clauses, and nearly nine hundred characters held up entirely by
+subordination. Taking that apart is what the tool does:
+
+![the longest sentence, analysed](docs/longest-sentence-analysis.png)
 
 ## Features
 
@@ -325,28 +347,6 @@ by filename: `node tests/run.js i18n`.
 | `pdf-layout.test.js` | PDF line assembly, paragraph splitting, heading detection (recall checked against the built-in book, precision against real false positives) |
 | `prompt.test.js` | system-prompt literals, translation-label rewriting, chapter-split fallbacks, provider defaults |
 | `a11y.test.js` | language tagging, keyboard reachability, live regions and dialog semantics, icon-button names, theme contrast |
-
-## One example
-
-One of the longest single sentences in the book, from the editor's introduction:
-
-> Nach einjährigem Urlaub, den das Paar in völliger Stille in Florenz verlebt, nimmt er
-> schweren Herzens eine Anstellung als stellvertretender Konsul in New York an, nachdem
-> Freunde im Auswärtigen Amt in Berlin ihm versichert haben, daß seinem Übergang aus der
-> Konsulatskarriere in den eigentlichen diplomatischen Dienst bei allernächster Gelegenheit
-> nichts im Wege stände; ein verhängnisvoller Irrtum, bei dem für jeden, dem die Verhältnisse
-> im diplomatischen Dienst in den achtziger Jahren bekannt sind, die Vermutung naheliegt,
-> dieser freundschaftliche Rat sei, den Gebern vielleicht selbst nicht bewußt, mit davon
-> beeinflußt gewesen, daß Heykings Ausscheiden aus dem Amt in Berlin seine Freunde der
-> Aufgabe überhob, sich öffentlich zu ihm zu bekennen, eine Aufgabe, die allerdings
-> angesichts des höfischen Einflusses seiner Gegner ein großes Maß von Selbständigkeit
-> erfordert hätte!
-
-One main clause, a `nachdem` adverbial clause, two layers of `daß` object clauses, two
-appositions, two relative clauses, and nearly nine hundred characters held up entirely by
-subordination. Taking that apart is what the tool does:
-
-![the longest sentence, analysed](docs/longest-sentence-analysis.png)
 
 ## Acknowledgments
 
