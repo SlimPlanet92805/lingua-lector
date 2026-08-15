@@ -21,6 +21,11 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%238a5a3f'/%3E%3Cg fill='%23ffffff' fill-opacity='0.5'%3E%3Crect x='6' y='6' width='20' height='3' rx='1.5'/%3E%3Crect x='6' y='11.7' width='7' height='3' rx='1.5'/%3E%3Crect x='20' y='17.4' width='6' height='3' rx='1.5'/%3E%3Crect x='6' y='23.1' width='14' height='3' rx='1.5'/%3E%3C/g%3E%3Cg fill='%23f6e6c8'%3E%3Crect x='14.5' y='11.4' width='11.5' height='3.6' rx='1.8'/%3E%3Crect x='6' y='17.1' width='12.5' height='3.6' rx='1.8'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   :root {
+    /* Width of the analysis panel. It is a variable because .panel (which
+       animates and clips) and .panel-scroll (which holds the text at a
+       constant width) have to agree on it exactly, and the breakpoints below
+       change it in one place. */
+    --panel-w: 420px;
     --paper: #ffffff;
     --paper-edge: #f2f2f0;
     --ink: #232323;
@@ -565,30 +570,49 @@
   }
 
   /* ---------- Side panel (analysis) ---------- */
+  /* The animating, clipping box. It has no padding and no text of its own, so
+     changing its size costs a clip and nothing else -- .panel-scroll below
+     keeps a constant width, so the analysis inside is laid out once and then
+     revealed, rather than re-wrapping on every frame. */
   .panel {
-    flex: 0 0 420px;
-    max-width: 420px;
+    flex: 0 0 var(--panel-w);
+    max-width: var(--panel-w);
     background: var(--panel-bg);
     border-left: 1px solid var(--rule);
     display: flex;
     flex-direction: column;
     font-family: var(--sans);
     box-shadow: -6px 0 24px var(--shadow);
-    transition: flex-basis .2s ease;
-    /* One scroll container for the whole panel, in every layout. The quoted
-       sentence used to sit in a fixed block above an independently scrolling
-       body, which meant two scrollbars and -- since this tool exists for
-       sentences that are NOT short -- a long quote permanently eating the
-       space the analysis needed. Everything below the header now scrolls
-       together. */
+    transition: flex-basis .22s cubic-bezier(.22, .61, .36, 1);
+    overflow: hidden;
+  }
+  .panel.collapsed { flex-basis: 0; max-width: 0; border-left: none; box-shadow: none; }
+
+  /* The scroll container: one for the whole panel, in every layout. The quoted
+     sentence used to sit in a fixed block above an independently scrolling
+     body, which meant two scrollbars and -- since this tool exists for
+     sentences that are NOT short -- a long quote permanently eating the space
+     the analysis needed. Everything below the header now scrolls together.
+     The fixed width is what keeps the text from reflowing while .panel
+     animates; flex-shrink: 0 stops the flex parent from squeezing it back. */
+  .panel-scroll {
+    /* Cross-axis size, so it is not affected by the flex-basis animation on
+       the parent -- this is the whole point of the split. When .panel is
+       mid-animation and narrower than this, the surplus is clipped off its
+       right edge, which is exactly the "already laid out, sliding into view"
+       look that animating the width itself could not produce. */
+    width: var(--panel-w);
+    flex: 1 1 0;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
     overflow-y: auto;
     /* Reaching the top or bottom of the analysis must not start scrolling the
        reader behind it, and on a phone must not hand the drag to the browser's
        pull-to-refresh either (see html, body above -- this stops the chain one
-       level earlier, at the sheet itself). */
+       level earlier, at the panel itself). */
     overscroll-behavior: contain;
   }
-  .panel.collapsed { flex: 0 0 0; max-width: 0; overflow: hidden; border-left: none; box-shadow: none; }
 
   /* Sticky, because it is now the only thing that does not scroll away: the
      dismiss control has to stay reachable no matter how far down the analysis
@@ -903,6 +927,16 @@
   }
   .settings-tab-btn:hover { color: var(--accent); }
   .settings-tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  /* The dialog animates its own height across a tab switch (see
+     animateModalResize); fading the incoming content in over the same beat
+     stops the new tab from appearing fully formed inside a box that is still
+     travelling. */
+  @keyframes settings-tab-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: none; }
+  }
+  .settings-tab-panel.active { animation: settings-tab-in .2s ease both; }
+
   .settings-tab-panel { display: none; }
   .settings-tab-panel.active { display: block; }
 
@@ -1070,11 +1104,19 @@
      its own tab bar, which is why that case is split out instead of sharing
      this one. */
   @media (max-width: 900px) and (orientation: portrait) {
+    :root { --panel-w: 100%; }
     .app { flex-direction: column; }
     .panel {
       flex: none; max-width: none; width: 100%; height: 82vh;
       border-left: none; border-top: 1px solid var(--rule); order: 2;
+      /* The sheet slides up and down instead of appearing and disappearing.
+         It is the same property the drag moves, so the two have to be kept
+         apart: .panel-dragging below turns the transition off for the
+         duration of a drag, or every finger movement would be chased by a
+         220ms ease and the sheet would lag behind the thumb. */
+      transition: height .22s cubic-bezier(.22, .61, .36, 1);
     }
+    .panel.panel-dragging { transition: none; }
     /* !important because a drag leaves an inline pixel height on the element
        (see wirePanelDrag), and an inline height beats a class rule: without
        this, dismissing the sheet after ever having dragged it did nothing at
@@ -1098,7 +1140,6 @@
       display: block;
       position: absolute;
       left: 0; right: 0; top: 0; height: 22px;
-      touch-action: none; /* the handle owns vertical drags; no scroll-chaining fight */
     }
     .panel-grip::before {
       content: '';
@@ -1116,7 +1157,14 @@
        title and dismiss button clear of the grip strip above them. */
     .panel-header {
       padding: 24px 14px 6px;
+      /* The entire header is the drag handle (see wirePanelDrag), so it must
+         own vertical gestures outright. Without this the browser treats the
+         same finger movement as a scroll of the sheet's contents and the drag
+         never reaches the height code. */
+      touch-action: none;
+      cursor: grab;
     }
+    .panel.panel-dragging .panel-header { cursor: grabbing; }
     .panel-header h2 { font-size: 12px; }
     .panel-close { min-height: 40px; min-width: 40px; padding: 6px; }
 
@@ -1134,7 +1182,7 @@
      sidebar layout instead of a bottom sheet -- narrower than the desktop
      420px so the reader keeps more than half the screen. */
   @media (max-width: 900px) and (orientation: landscape) {
-    .panel { flex: 0 0 44%; max-width: 340px; }
+    :root { --panel-w: 340px; }
   }
 
   /* Phones. The 900px rules above already stack the panel under the reader;

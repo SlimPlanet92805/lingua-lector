@@ -48,7 +48,14 @@
     </div>
   </div>
 
+  <!-- Two boxes, deliberately: .panel is the one whose size animates (width as
+       a sidebar, height as a bottom sheet) and clips, while .panel-scroll
+       inside it keeps a fixed width and does the scrolling. Animating a single
+       box would re-wrap every line of the analysis on every frame of the
+       opening animation -- the text visibly reflowing as the panel widened was
+       the complaint. -->
   <div class="panel" id="panel" role="region" aria-labelledby="panel-title">
+   <div class="panel-scroll" id="panel-scroll">
     <div class="panel-header" id="panel-header">
       <!-- Drag-to-resize / drag-to-dismiss grip. Only active as a bottom-sheet
            on narrow portrait screens (see wirePanelDrag() in part6); harmless,
@@ -62,6 +69,7 @@
     <div class="panel-body" id="panel-body" aria-live="polite" aria-busy="false">
       <div class="panel-empty" id="panel-empty-msg" data-i18n="panel.emptyMsg">点击左侧正文中的任意一句，<br>这里会显示句子结构拆解和词汇讲解。</div>
     </div>
+   </div>
   </div>
 </div>
 

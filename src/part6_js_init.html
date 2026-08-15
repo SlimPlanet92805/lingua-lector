@@ -268,13 +268,51 @@ function applyFont() {
   document.documentElement.style.setProperty('--reading-font-size', (settings.fontSize || 19) + 'px');
 }
 
+// The four settings tabs hold very different amounts of content -- the
+// language tab is three long chip rows, the document tab is a short list --
+// so switching between them resized the dialog instantly, and because the
+// dialog is centred in the overlay it jumped in both directions at once.
+// Running `mutate` between two measurements and animating across the
+// difference turns that jump into the dialog growing or shrinking to fit.
+const MODAL_RESIZE_MS = 200;
+
+function animateModalResize(modal, mutate) {
+  if (!modal) { mutate(); return; }
+  const before = modal.getBoundingClientRect().height;
+  mutate();
+  // Cleared first in case a previous switch is still animating, so `after` is
+  // the natural height of the new content rather than a frozen mid-animation
+  // one.
+  modal.style.height = '';
+  const after = modal.getBoundingClientRect().height;
+  if (before === after || prefersReducedMotion()) return;
+
+  const restoreOverflow = modal.style.overflowY;
+  modal.style.overflowY = 'hidden';
+  modal.style.height = before + 'px';
+  void modal.offsetHeight; // commit the start height before the transition
+  modal.style.transition = `height ${MODAL_RESIZE_MS}ms cubic-bezier(.22, .61, .36, 1)`;
+  modal.style.height = after + 'px';
+  clearTimeout(modal.__resizeTimer);
+  modal.__resizeTimer = setTimeout(() => {
+    // Back to auto: the dialog has to stay able to grow on its own afterwards
+    // (a custom-language field appearing, the window being resized).
+    modal.style.transition = '';
+    modal.style.height = '';
+    modal.style.overflowY = restoreOverflow;
+  }, MODAL_RESIZE_MS + 30);
+}
+
 function wireSettingsTabs() {
+  const modal = document.querySelector('#settings-overlay .modal');
   document.querySelectorAll('.settings-tab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.settings-tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.settings-tab-panel').forEach(p => p.classList.remove('active'));
-      btn.classList.add('active');
-      document.querySelector(`.settings-tab-panel[data-settings-tab="${btn.dataset.settingsTab}"]`).classList.add('active');
+      animateModalResize(modal, () => {
+        document.querySelectorAll('.settings-tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.settings-tab-panel').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        document.querySelector(`.settings-tab-panel[data-settings-tab="${btn.dataset.settingsTab}"]`).classList.add('active');
+      });
     });
   });
 }

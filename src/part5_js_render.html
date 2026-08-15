@@ -349,8 +349,30 @@ function wireSentenceDelegation() {
   root.addEventListener('click', (e) => {
     const span = sentenceAt(e.target);
     if (span) onSentenceClick(span, textFor(span));
-    else clearActiveSentence(); // tapped the margin/gap between sentences, not one of them
   });
+
+  // "Click somewhere blank to put the sentence down" has to be wired to the
+  // whole reading area, not to #text-container. In fit-height mode the
+  // container is given an explicit width and height and does cover the page,
+  // which is why this appeared to work; in the paragraph modes (the default,
+  // and so what most people actually see) it is only as tall as the text it
+  // holds, so every genuinely blank spot -- the page margins, the gap under
+  // the last paragraph -- is outside it and the click landed on nothing.
+  //
+  // It also closes the panel now. The panel is showing the analysis of the
+  // sentence being put down; leaving it open afterwards left the reader
+  // looking at a breakdown of a sentence that was no longer marked anywhere.
+  const readerWrap = document.querySelector('.reader-wrap');
+  if (readerWrap) {
+    readerWrap.addEventListener('click', (e) => {
+      if (sentenceAt(e.target)) return;
+      // Everything with its own job: the pager, the editable title fields, the
+      // toolbar. Clicking those is not "clicking blank space".
+      if (e.target.closest && e.target.closest('button, input, select, textarea, a, label')) return;
+      if (!panelEl.classList.contains('collapsed')) togglePanel(); // this clears the highlight too
+      else clearActiveSentence();
+    });
+  }
 
   root.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -575,13 +597,99 @@ function updatePagerUI() {
   document.querySelectorAll('.pager-next').forEach(el => { el.disabled = currentPage >= totalPages - 1; });
 }
 
+// How long each half of a page turn takes in the paragraph modes. Short: this
+// fires on every single page turn, and an animation you see a hundred times an
+// evening has to be over before it can start being in the way.
+const PAGE_SLIDE_MS = 150;
+let pageSlideTimers = [];
+// The page a turn already in flight is heading for. currentPage does not
+// change until the outgoing half finishes, so without this a second tap on
+// "next" during those 150ms computed its target from the page being left and
+// asked for the one already on its way -- holding the button down advanced one
+// page instead of several.
+let pendingPage = null;
+function plannedPage() {
+  return pendingPage === null ? currentPage : pendingPage;
+}
+function turnPage(step) {
+  goToPage(plannedPage() + step);
+}
+
+function prefersReducedMotion() {
+  return typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+// In fit-height mode the whole book is laid out as one wide column strip and a
+// page turn is just a translate of that strip, so it slides for free. The
+// paragraph modes rebuild the container's contents instead, which is why they
+// used to cut hard from one page to the next -- and since the paragraph mode is
+// the default, that is what a phone shows unless its owner went and changed the
+// setting. This gives them the same movement: the old page leaves in the
+// direction of travel, the new one comes in from the other side.
+function slidePageTo(idx) {
+  const columns = document.getElementById('text-columns');
+  const container = document.getElementById('text-container');
+  if (!columns || !container || prefersReducedMotion()) {
+    renderPage(idx);
+    return;
+  }
+  // A second turn arriving mid-animation must not leave the first one's
+  // cleanup to fire later and wipe the styles out from under it.
+  pageSlideTimers.forEach(clearTimeout);
+  pageSlideTimers = [];
+
+  const dir = idx > plannedPage() ? 1 : -1;
+  pendingPage = idx;
+  const distance = container.getBoundingClientRect().width || columns.getBoundingClientRect().width;
+  container.style.overflow = 'hidden';
+
+  const ease = (ms, curve) => `transform ${ms}ms ${curve}, opacity ${ms}ms ${curve}`;
+  columns.style.transition = ease(PAGE_SLIDE_MS, 'ease-in');
+  columns.style.transform = `translateX(${-dir * distance}px)`;
+  columns.style.opacity = '0';
+
+  pageSlideTimers.push(setTimeout(() => {
+    // renderPage -> resetColumnLayout clears the transform, the transition AND
+    // the container's overflow, so everything the incoming half needs has to be
+    // set after it, not before.
+    renderPage(idx);
+    pendingPage = null;
+    container.style.overflow = 'hidden';
+    columns.style.transition = 'none';
+    columns.style.transform = `translateX(${dir * distance}px)`;
+    columns.style.opacity = '0';
+    // A forced reflow, not requestAnimationFrame: rAF does not run while the
+    // tab is in the background, and a page turn left half-finished there would
+    // come back to a blank, translated-off-screen page. A synchronous reflow
+    // commits the start position with no dependency on frames being produced,
+    // and the timers below fire either way.
+    void columns.offsetHeight;
+    columns.style.transition = ease(PAGE_SLIDE_MS, 'ease-out');
+    columns.style.transform = 'translateX(0)';
+    columns.style.opacity = '1';
+    pageSlideTimers.push(setTimeout(() => {
+      columns.style.transition = '';
+      columns.style.transform = '';
+      columns.style.opacity = '';
+      // Back to the stylesheet's value, not to whatever was there when this
+      // turn started: a turn interrupting another one would otherwise capture
+      // the previous turn's temporary `hidden` and restore that forever.
+      container.style.overflow = '';
+    }, PAGE_SLIDE_MS + 30));
+  }, PAGE_SLIDE_MS));
+}
+
 function goToPage(idx) {
-  if (idx === currentPage) return;
+  idx = Math.max(0, Math.min(totalPages - 1, idx));
+  if (idx === plannedPage()) return;
   if (settings.paginationMode === 'fit-height') {
     const columns = document.getElementById('text-columns');
     if (columns) columns.style.transition = 'transform .2s ease';
+    renderPage(idx);
+    return;
   }
-  renderPage(idx);
+  slidePageTo(idx);
 }
 
 async function saveProgress() {
@@ -618,10 +726,10 @@ async function loadProgress() {
 
 function wirePagerControls() {
   document.querySelectorAll('.pager-prev').forEach(btn => {
-    btn.addEventListener('click', () => goToPage(currentPage - 1));
+    btn.addEventListener('click', () => turnPage(-1));
   });
   document.querySelectorAll('.pager-next').forEach(btn => {
-    btn.addEventListener('click', () => goToPage(currentPage + 1));
+    btn.addEventListener('click', () => turnPage(1));
   });
   document.querySelectorAll('.pager-page-input').forEach(input => {
     const commit = () => {
@@ -925,10 +1033,10 @@ function wireKeyboardShortcuts() {
 
     if (e.key === 'ArrowLeft' || e.key === 'h') {
       e.preventDefault();
-      goToPage(currentPage - 1);
+      turnPage(-1);
     } else if (e.key === 'ArrowRight' || e.key === 'l') {
       e.preventDefault();
-      goToPage(currentPage + 1);
+      turnPage(1);
     }
   });
 }
@@ -965,10 +1073,16 @@ function togglePanel() {
 // ============================================================
 // Bottom-sheet drag (the panel's mobile-portrait layout only -- landscape
 // and desktop keep the fixed-width sidebar, where dragging a height makes no
-// sense). Freeform, no snap points: the grip just moves panelEl's own height
+// sense). Freeform, no snap points: the drag just moves panelEl's own height
 // between a floor and a near-fullscreen ceiling, and releasing it below the
 // floor dismisses the panel the same way the close button does, rather than
 // leaving it stuck open at a sliver.
+//
+// The whole header is the handle, not just the visible bar. Aiming for a 22px
+// strip is a fussy target on a phone, and the header looks like one solid
+// grabbable thing -- so a drag that started anywhere else on it did nothing
+// except scroll the sheet's contents to their top and rubber-band back, which
+// reads as the sheet refusing to move.
 // ============================================================
 const PANEL_SHEET_QUERY = '(max-width: 900px) and (orientation: portrait)';
 function isPanelSheet() {
@@ -976,38 +1090,51 @@ function isPanelSheet() {
 }
 
 function wirePanelDrag() {
-  const grip = document.getElementById('panel-grip');
-  if (!grip) return;
+  const handle = document.getElementById('panel-header');
+  if (!handle) return;
   let dragging = false;
   let startY = 0;
   let startHeight = 0;
+  // The height the drag last asked for. Read back at release instead of
+  // measuring the element: by then the transition is being re-enabled, and a
+  // measurement taken across that boundary can report the height the sheet is
+  // animating *from* rather than the one the finger left it at.
+  let draggedHeight = 0;
 
-  grip.addEventListener('pointerdown', (e) => {
+  handle.addEventListener('pointerdown', (e) => {
     if (!isPanelSheet()) return;
+    // The dismiss button lives in the handle. A press on it is a press on it.
+    if (e.target.closest && e.target.closest('.panel-close')) return;
     dragging = true;
     startY = e.clientY;
     startHeight = panelEl.getBoundingClientRect().height;
-    grip.setPointerCapture(e.pointerId);
+    draggedHeight = startHeight;
+    // The height transition is for open/close; during a drag it would make
+    // the sheet trail 220ms behind the finger.
+    panelEl.classList.add('panel-dragging');
+    handle.setPointerCapture(e.pointerId);
   });
 
-  grip.addEventListener('pointermove', (e) => {
+  handle.addEventListener('pointermove', (e) => {
     if (!dragging) return;
     const deltaY = startY - e.clientY; // dragging up shortens deltaY's sign, growing the panel
     const minHeight = window.innerHeight * 0.32;
     const maxHeight = window.innerHeight * 0.94;
-    panelEl.style.height = Math.min(maxHeight, Math.max(minHeight, startHeight + deltaY)) + 'px';
+    draggedHeight = Math.min(maxHeight, Math.max(minHeight, startHeight + deltaY));
+    panelEl.style.height = draggedHeight + 'px';
   });
 
   function endDrag() {
     if (!dragging) return;
     dragging = false;
-    if (panelEl.getBoundingClientRect().height <= window.innerHeight * 0.34) {
+    panelEl.classList.remove('panel-dragging');
+    if (draggedHeight <= window.innerHeight * 0.34) {
       panelEl.style.height = ''; // back to the CSS default for next time
       if (!panelEl.classList.contains('collapsed')) togglePanel();
     }
   }
-  grip.addEventListener('pointerup', endDrag);
-  grip.addEventListener('pointercancel', endDrag);
+  handle.addEventListener('pointerup', endDrag);
+  handle.addEventListener('pointercancel', endDrag);
 
   // Rotating to landscape (or resizing past the breakpoint) while a drag has
   // left an inline pixel height behind must not leave that height fighting

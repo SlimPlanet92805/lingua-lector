@@ -21,6 +21,11 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%238a5a3f'/%3E%3Cg fill='%23ffffff' fill-opacity='0.5'%3E%3Crect x='6' y='6' width='20' height='3' rx='1.5'/%3E%3Crect x='6' y='11.7' width='7' height='3' rx='1.5'/%3E%3Crect x='20' y='17.4' width='6' height='3' rx='1.5'/%3E%3Crect x='6' y='23.1' width='14' height='3' rx='1.5'/%3E%3C/g%3E%3Cg fill='%23f6e6c8'%3E%3Crect x='14.5' y='11.4' width='11.5' height='3.6' rx='1.8'/%3E%3Crect x='6' y='17.1' width='12.5' height='3.6' rx='1.8'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   :root {
+    /* Width of the analysis panel. It is a variable because .panel (which
+       animates and clips) and .panel-scroll (which holds the text at a
+       constant width) have to agree on it exactly, and the breakpoints below
+       change it in one place. */
+    --panel-w: 420px;
     --paper: #ffffff;
     --paper-edge: #f2f2f0;
     --ink: #232323;
@@ -565,30 +570,49 @@
   }
 
   /* ---------- Side panel (analysis) ---------- */
+  /* The animating, clipping box. It has no padding and no text of its own, so
+     changing its size costs a clip and nothing else -- .panel-scroll below
+     keeps a constant width, so the analysis inside is laid out once and then
+     revealed, rather than re-wrapping on every frame. */
   .panel {
-    flex: 0 0 420px;
-    max-width: 420px;
+    flex: 0 0 var(--panel-w);
+    max-width: var(--panel-w);
     background: var(--panel-bg);
     border-left: 1px solid var(--rule);
     display: flex;
     flex-direction: column;
     font-family: var(--sans);
     box-shadow: -6px 0 24px var(--shadow);
-    transition: flex-basis .2s ease;
-    /* One scroll container for the whole panel, in every layout. The quoted
-       sentence used to sit in a fixed block above an independently scrolling
-       body, which meant two scrollbars and -- since this tool exists for
-       sentences that are NOT short -- a long quote permanently eating the
-       space the analysis needed. Everything below the header now scrolls
-       together. */
+    transition: flex-basis .22s cubic-bezier(.22, .61, .36, 1);
+    overflow: hidden;
+  }
+  .panel.collapsed { flex-basis: 0; max-width: 0; border-left: none; box-shadow: none; }
+
+  /* The scroll container: one for the whole panel, in every layout. The quoted
+     sentence used to sit in a fixed block above an independently scrolling
+     body, which meant two scrollbars and -- since this tool exists for
+     sentences that are NOT short -- a long quote permanently eating the space
+     the analysis needed. Everything below the header now scrolls together.
+     The fixed width is what keeps the text from reflowing while .panel
+     animates; flex-shrink: 0 stops the flex parent from squeezing it back. */
+  .panel-scroll {
+    /* Cross-axis size, so it is not affected by the flex-basis animation on
+       the parent -- this is the whole point of the split. When .panel is
+       mid-animation and narrower than this, the surplus is clipped off its
+       right edge, which is exactly the "already laid out, sliding into view"
+       look that animating the width itself could not produce. */
+    width: var(--panel-w);
+    flex: 1 1 0;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
     overflow-y: auto;
     /* Reaching the top or bottom of the analysis must not start scrolling the
        reader behind it, and on a phone must not hand the drag to the browser's
        pull-to-refresh either (see html, body above -- this stops the chain one
-       level earlier, at the sheet itself). */
+       level earlier, at the panel itself). */
     overscroll-behavior: contain;
   }
-  .panel.collapsed { flex: 0 0 0; max-width: 0; overflow: hidden; border-left: none; box-shadow: none; }
 
   /* Sticky, because it is now the only thing that does not scroll away: the
      dismiss control has to stay reachable no matter how far down the analysis
@@ -903,6 +927,16 @@
   }
   .settings-tab-btn:hover { color: var(--accent); }
   .settings-tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  /* The dialog animates its own height across a tab switch (see
+     animateModalResize); fading the incoming content in over the same beat
+     stops the new tab from appearing fully formed inside a box that is still
+     travelling. */
+  @keyframes settings-tab-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: none; }
+  }
+  .settings-tab-panel.active { animation: settings-tab-in .2s ease both; }
+
   .settings-tab-panel { display: none; }
   .settings-tab-panel.active { display: block; }
 
@@ -1070,11 +1104,19 @@
      its own tab bar, which is why that case is split out instead of sharing
      this one. */
   @media (max-width: 900px) and (orientation: portrait) {
+    :root { --panel-w: 100%; }
     .app { flex-direction: column; }
     .panel {
       flex: none; max-width: none; width: 100%; height: 82vh;
       border-left: none; border-top: 1px solid var(--rule); order: 2;
+      /* The sheet slides up and down instead of appearing and disappearing.
+         It is the same property the drag moves, so the two have to be kept
+         apart: .panel-dragging below turns the transition off for the
+         duration of a drag, or every finger movement would be chased by a
+         220ms ease and the sheet would lag behind the thumb. */
+      transition: height .22s cubic-bezier(.22, .61, .36, 1);
     }
+    .panel.panel-dragging { transition: none; }
     /* !important because a drag leaves an inline pixel height on the element
        (see wirePanelDrag), and an inline height beats a class rule: without
        this, dismissing the sheet after ever having dragged it did nothing at
@@ -1098,7 +1140,6 @@
       display: block;
       position: absolute;
       left: 0; right: 0; top: 0; height: 22px;
-      touch-action: none; /* the handle owns vertical drags; no scroll-chaining fight */
     }
     .panel-grip::before {
       content: '';
@@ -1116,7 +1157,14 @@
        title and dismiss button clear of the grip strip above them. */
     .panel-header {
       padding: 24px 14px 6px;
+      /* The entire header is the drag handle (see wirePanelDrag), so it must
+         own vertical gestures outright. Without this the browser treats the
+         same finger movement as a scroll of the sheet's contents and the drag
+         never reaches the height code. */
+      touch-action: none;
+      cursor: grab;
     }
+    .panel.panel-dragging .panel-header { cursor: grabbing; }
     .panel-header h2 { font-size: 12px; }
     .panel-close { min-height: 40px; min-width: 40px; padding: 6px; }
 
@@ -1134,7 +1182,7 @@
      sidebar layout instead of a bottom sheet -- narrower than the desktop
      420px so the reader keeps more than half the screen. */
   @media (max-width: 900px) and (orientation: landscape) {
-    .panel { flex: 0 0 44%; max-width: 340px; }
+    :root { --panel-w: 340px; }
   }
 
   /* Phones. The 900px rules above already stack the panel under the reader;
@@ -1293,7 +1341,14 @@
     </div>
   </div>
 
+  <!-- Two boxes, deliberately: .panel is the one whose size animates (width as
+       a sidebar, height as a bottom sheet) and clips, while .panel-scroll
+       inside it keeps a fixed width and does the scrolling. Animating a single
+       box would re-wrap every line of the analysis on every frame of the
+       opening animation -- the text visibly reflowing as the panel widened was
+       the complaint. -->
   <div class="panel" id="panel" role="region" aria-labelledby="panel-title">
+   <div class="panel-scroll" id="panel-scroll">
     <div class="panel-header" id="panel-header">
       <!-- Drag-to-resize / drag-to-dismiss grip. Only active as a bottom-sheet
            on narrow portrait screens (see wirePanelDrag() in part6); harmless,
@@ -1307,6 +1362,7 @@
     <div class="panel-body" id="panel-body" aria-live="polite" aria-busy="false">
       <div class="panel-empty" id="panel-empty-msg" data-i18n="panel.emptyMsg">点击左侧正文中的任意一句，<br>这里会显示句子结构拆解和词汇讲解。</div>
     </div>
+   </div>
   </div>
 </div>
 
@@ -5700,8 +5756,30 @@ function wireSentenceDelegation() {
   root.addEventListener('click', (e) => {
     const span = sentenceAt(e.target);
     if (span) onSentenceClick(span, textFor(span));
-    else clearActiveSentence(); // tapped the margin/gap between sentences, not one of them
   });
+
+  // "Click somewhere blank to put the sentence down" has to be wired to the
+  // whole reading area, not to #text-container. In fit-height mode the
+  // container is given an explicit width and height and does cover the page,
+  // which is why this appeared to work; in the paragraph modes (the default,
+  // and so what most people actually see) it is only as tall as the text it
+  // holds, so every genuinely blank spot -- the page margins, the gap under
+  // the last paragraph -- is outside it and the click landed on nothing.
+  //
+  // It also closes the panel now. The panel is showing the analysis of the
+  // sentence being put down; leaving it open afterwards left the reader
+  // looking at a breakdown of a sentence that was no longer marked anywhere.
+  const readerWrap = document.querySelector('.reader-wrap');
+  if (readerWrap) {
+    readerWrap.addEventListener('click', (e) => {
+      if (sentenceAt(e.target)) return;
+      // Everything with its own job: the pager, the editable title fields, the
+      // toolbar. Clicking those is not "clicking blank space".
+      if (e.target.closest && e.target.closest('button, input, select, textarea, a, label')) return;
+      if (!panelEl.classList.contains('collapsed')) togglePanel(); // this clears the highlight too
+      else clearActiveSentence();
+    });
+  }
 
   root.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -5926,13 +6004,99 @@ function updatePagerUI() {
   document.querySelectorAll('.pager-next').forEach(el => { el.disabled = currentPage >= totalPages - 1; });
 }
 
+// How long each half of a page turn takes in the paragraph modes. Short: this
+// fires on every single page turn, and an animation you see a hundred times an
+// evening has to be over before it can start being in the way.
+const PAGE_SLIDE_MS = 150;
+let pageSlideTimers = [];
+// The page a turn already in flight is heading for. currentPage does not
+// change until the outgoing half finishes, so without this a second tap on
+// "next" during those 150ms computed its target from the page being left and
+// asked for the one already on its way -- holding the button down advanced one
+// page instead of several.
+let pendingPage = null;
+function plannedPage() {
+  return pendingPage === null ? currentPage : pendingPage;
+}
+function turnPage(step) {
+  goToPage(plannedPage() + step);
+}
+
+function prefersReducedMotion() {
+  return typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+// In fit-height mode the whole book is laid out as one wide column strip and a
+// page turn is just a translate of that strip, so it slides for free. The
+// paragraph modes rebuild the container's contents instead, which is why they
+// used to cut hard from one page to the next -- and since the paragraph mode is
+// the default, that is what a phone shows unless its owner went and changed the
+// setting. This gives them the same movement: the old page leaves in the
+// direction of travel, the new one comes in from the other side.
+function slidePageTo(idx) {
+  const columns = document.getElementById('text-columns');
+  const container = document.getElementById('text-container');
+  if (!columns || !container || prefersReducedMotion()) {
+    renderPage(idx);
+    return;
+  }
+  // A second turn arriving mid-animation must not leave the first one's
+  // cleanup to fire later and wipe the styles out from under it.
+  pageSlideTimers.forEach(clearTimeout);
+  pageSlideTimers = [];
+
+  const dir = idx > plannedPage() ? 1 : -1;
+  pendingPage = idx;
+  const distance = container.getBoundingClientRect().width || columns.getBoundingClientRect().width;
+  container.style.overflow = 'hidden';
+
+  const ease = (ms, curve) => `transform ${ms}ms ${curve}, opacity ${ms}ms ${curve}`;
+  columns.style.transition = ease(PAGE_SLIDE_MS, 'ease-in');
+  columns.style.transform = `translateX(${-dir * distance}px)`;
+  columns.style.opacity = '0';
+
+  pageSlideTimers.push(setTimeout(() => {
+    // renderPage -> resetColumnLayout clears the transform, the transition AND
+    // the container's overflow, so everything the incoming half needs has to be
+    // set after it, not before.
+    renderPage(idx);
+    pendingPage = null;
+    container.style.overflow = 'hidden';
+    columns.style.transition = 'none';
+    columns.style.transform = `translateX(${dir * distance}px)`;
+    columns.style.opacity = '0';
+    // A forced reflow, not requestAnimationFrame: rAF does not run while the
+    // tab is in the background, and a page turn left half-finished there would
+    // come back to a blank, translated-off-screen page. A synchronous reflow
+    // commits the start position with no dependency on frames being produced,
+    // and the timers below fire either way.
+    void columns.offsetHeight;
+    columns.style.transition = ease(PAGE_SLIDE_MS, 'ease-out');
+    columns.style.transform = 'translateX(0)';
+    columns.style.opacity = '1';
+    pageSlideTimers.push(setTimeout(() => {
+      columns.style.transition = '';
+      columns.style.transform = '';
+      columns.style.opacity = '';
+      // Back to the stylesheet's value, not to whatever was there when this
+      // turn started: a turn interrupting another one would otherwise capture
+      // the previous turn's temporary `hidden` and restore that forever.
+      container.style.overflow = '';
+    }, PAGE_SLIDE_MS + 30));
+  }, PAGE_SLIDE_MS));
+}
+
 function goToPage(idx) {
-  if (idx === currentPage) return;
+  idx = Math.max(0, Math.min(totalPages - 1, idx));
+  if (idx === plannedPage()) return;
   if (settings.paginationMode === 'fit-height') {
     const columns = document.getElementById('text-columns');
     if (columns) columns.style.transition = 'transform .2s ease';
+    renderPage(idx);
+    return;
   }
-  renderPage(idx);
+  slidePageTo(idx);
 }
 
 async function saveProgress() {
@@ -5969,10 +6133,10 @@ async function loadProgress() {
 
 function wirePagerControls() {
   document.querySelectorAll('.pager-prev').forEach(btn => {
-    btn.addEventListener('click', () => goToPage(currentPage - 1));
+    btn.addEventListener('click', () => turnPage(-1));
   });
   document.querySelectorAll('.pager-next').forEach(btn => {
-    btn.addEventListener('click', () => goToPage(currentPage + 1));
+    btn.addEventListener('click', () => turnPage(1));
   });
   document.querySelectorAll('.pager-page-input').forEach(input => {
     const commit = () => {
@@ -6276,10 +6440,10 @@ function wireKeyboardShortcuts() {
 
     if (e.key === 'ArrowLeft' || e.key === 'h') {
       e.preventDefault();
-      goToPage(currentPage - 1);
+      turnPage(-1);
     } else if (e.key === 'ArrowRight' || e.key === 'l') {
       e.preventDefault();
-      goToPage(currentPage + 1);
+      turnPage(1);
     }
   });
 }
@@ -6316,10 +6480,16 @@ function togglePanel() {
 // ============================================================
 // Bottom-sheet drag (the panel's mobile-portrait layout only -- landscape
 // and desktop keep the fixed-width sidebar, where dragging a height makes no
-// sense). Freeform, no snap points: the grip just moves panelEl's own height
+// sense). Freeform, no snap points: the drag just moves panelEl's own height
 // between a floor and a near-fullscreen ceiling, and releasing it below the
 // floor dismisses the panel the same way the close button does, rather than
 // leaving it stuck open at a sliver.
+//
+// The whole header is the handle, not just the visible bar. Aiming for a 22px
+// strip is a fussy target on a phone, and the header looks like one solid
+// grabbable thing -- so a drag that started anywhere else on it did nothing
+// except scroll the sheet's contents to their top and rubber-band back, which
+// reads as the sheet refusing to move.
 // ============================================================
 const PANEL_SHEET_QUERY = '(max-width: 900px) and (orientation: portrait)';
 function isPanelSheet() {
@@ -6327,38 +6497,51 @@ function isPanelSheet() {
 }
 
 function wirePanelDrag() {
-  const grip = document.getElementById('panel-grip');
-  if (!grip) return;
+  const handle = document.getElementById('panel-header');
+  if (!handle) return;
   let dragging = false;
   let startY = 0;
   let startHeight = 0;
+  // The height the drag last asked for. Read back at release instead of
+  // measuring the element: by then the transition is being re-enabled, and a
+  // measurement taken across that boundary can report the height the sheet is
+  // animating *from* rather than the one the finger left it at.
+  let draggedHeight = 0;
 
-  grip.addEventListener('pointerdown', (e) => {
+  handle.addEventListener('pointerdown', (e) => {
     if (!isPanelSheet()) return;
+    // The dismiss button lives in the handle. A press on it is a press on it.
+    if (e.target.closest && e.target.closest('.panel-close')) return;
     dragging = true;
     startY = e.clientY;
     startHeight = panelEl.getBoundingClientRect().height;
-    grip.setPointerCapture(e.pointerId);
+    draggedHeight = startHeight;
+    // The height transition is for open/close; during a drag it would make
+    // the sheet trail 220ms behind the finger.
+    panelEl.classList.add('panel-dragging');
+    handle.setPointerCapture(e.pointerId);
   });
 
-  grip.addEventListener('pointermove', (e) => {
+  handle.addEventListener('pointermove', (e) => {
     if (!dragging) return;
     const deltaY = startY - e.clientY; // dragging up shortens deltaY's sign, growing the panel
     const minHeight = window.innerHeight * 0.32;
     const maxHeight = window.innerHeight * 0.94;
-    panelEl.style.height = Math.min(maxHeight, Math.max(minHeight, startHeight + deltaY)) + 'px';
+    draggedHeight = Math.min(maxHeight, Math.max(minHeight, startHeight + deltaY));
+    panelEl.style.height = draggedHeight + 'px';
   });
 
   function endDrag() {
     if (!dragging) return;
     dragging = false;
-    if (panelEl.getBoundingClientRect().height <= window.innerHeight * 0.34) {
+    panelEl.classList.remove('panel-dragging');
+    if (draggedHeight <= window.innerHeight * 0.34) {
       panelEl.style.height = ''; // back to the CSS default for next time
       if (!panelEl.classList.contains('collapsed')) togglePanel();
     }
   }
-  grip.addEventListener('pointerup', endDrag);
-  grip.addEventListener('pointercancel', endDrag);
+  handle.addEventListener('pointerup', endDrag);
+  handle.addEventListener('pointercancel', endDrag);
 
   // Rotating to landscape (or resizing past the breakpoint) while a drag has
   // left an inline pixel height behind must not leave that height fighting
@@ -7322,13 +7505,51 @@ function applyFont() {
   document.documentElement.style.setProperty('--reading-font-size', (settings.fontSize || 19) + 'px');
 }
 
+// The four settings tabs hold very different amounts of content -- the
+// language tab is three long chip rows, the document tab is a short list --
+// so switching between them resized the dialog instantly, and because the
+// dialog is centred in the overlay it jumped in both directions at once.
+// Running `mutate` between two measurements and animating across the
+// difference turns that jump into the dialog growing or shrinking to fit.
+const MODAL_RESIZE_MS = 200;
+
+function animateModalResize(modal, mutate) {
+  if (!modal) { mutate(); return; }
+  const before = modal.getBoundingClientRect().height;
+  mutate();
+  // Cleared first in case a previous switch is still animating, so `after` is
+  // the natural height of the new content rather than a frozen mid-animation
+  // one.
+  modal.style.height = '';
+  const after = modal.getBoundingClientRect().height;
+  if (before === after || prefersReducedMotion()) return;
+
+  const restoreOverflow = modal.style.overflowY;
+  modal.style.overflowY = 'hidden';
+  modal.style.height = before + 'px';
+  void modal.offsetHeight; // commit the start height before the transition
+  modal.style.transition = `height ${MODAL_RESIZE_MS}ms cubic-bezier(.22, .61, .36, 1)`;
+  modal.style.height = after + 'px';
+  clearTimeout(modal.__resizeTimer);
+  modal.__resizeTimer = setTimeout(() => {
+    // Back to auto: the dialog has to stay able to grow on its own afterwards
+    // (a custom-language field appearing, the window being resized).
+    modal.style.transition = '';
+    modal.style.height = '';
+    modal.style.overflowY = restoreOverflow;
+  }, MODAL_RESIZE_MS + 30);
+}
+
 function wireSettingsTabs() {
+  const modal = document.querySelector('#settings-overlay .modal');
   document.querySelectorAll('.settings-tab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.settings-tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.settings-tab-panel').forEach(p => p.classList.remove('active'));
-      btn.classList.add('active');
-      document.querySelector(`.settings-tab-panel[data-settings-tab="${btn.dataset.settingsTab}"]`).classList.add('active');
+      animateModalResize(modal, () => {
+        document.querySelectorAll('.settings-tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.settings-tab-panel').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        document.querySelector(`.settings-tab-panel[data-settings-tab="${btn.dataset.settingsTab}"]`).classList.add('active');
+      });
     });
   });
 }
