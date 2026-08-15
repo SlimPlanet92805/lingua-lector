@@ -155,6 +155,21 @@ module.exports = ({ describe, it, assert }) => {
         'prompt must separate verb mood from clause type');
     });
 
+    // Reported from real reading: `wie man sie auch in Europa an
+    // Staatsgebäuden sieht` came back as a relative clause introduced by the
+    // "relative adverb wie" -- and the same sentence of the answer went on to
+    // say that `sie` inside the clause refers to the antecedent, which is
+    // precisely what proves it is not one.
+    it('rules out wie-clauses and gives the resumptive-pronoun test', () => {
+      const { get } = loadApp();
+      const prompt = get('buildSystemPrompt')();
+      assert.ok(/比较从句|Vergleichssatz/.test(prompt),
+        'prompt must name the comparative clause as what a wie-clause is');
+      assert.ok(/关系代词自己就是从句里的那个成分/.test(prompt),
+        'prompt must explain why a relative pronoun leaves no resumptive pronoun');
+      assert.ok(/复指代词/.test(prompt), 'prompt must state the resumptive-pronoun test');
+    });
+
     it('puts the literal headings and label into the prompt', () => {
       const { get } = loadApp();
       const build = get('buildSystemPrompt');
