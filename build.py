@@ -70,7 +70,13 @@ def main():
     html = html.replace(placeholder, chapters_json)
 
     DIST.parent.mkdir(parents=True, exist_ok=True)
-    DIST.write_text(html, encoding="utf-8")
+    # newline="\n" pins the output to LF regardless of platform. Without it,
+    # write_text() translates "\n" to os.linesep on write -- CRLF on Windows,
+    # LF on Linux -- so the same source produces a byte-different dist/ on a
+    # Windows dev machine versus the Ubuntu CI runner, and the CI job that
+    # diffs a fresh build against the committed one (see .github/workflows/)
+    # fails on every single line despite the content being identical.
+    DIST.write_text(html, encoding="utf-8", newline="\n")
 
     total_chars = sum(len(p) for c in chapters for p in c["paragraphs"])
     print(f"wrote {DIST} ({len(html):,} bytes html, {total_chars:,} chars of book text, {len(chapters)} chapters)")
