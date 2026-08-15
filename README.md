@@ -83,6 +83,9 @@ subordination. Taking that apart is what the tool does:
 - **Document library**: the built-in book plus as many imports as you like, each with its own
   cache and reading position. Text and caches live in IndexedDB (falling back to
   `localStorage`), so a several-hundred-page book fits, and the library shows what each costs
+- **Export vocabulary to CSV**: pull every word already explained in a document into one file —
+  word, notes, the sentence it came from, and chapter — ready to import into Anki or any other
+  spaced-repetition tool
 - **Multi-format import**: `.txt` / `.docx` / `.pdf` / `.epub`, all parsed in the browser —
   files never leave your machine
 - **PDF that actually reflows.** A normal PDF reader draws you a photograph of a page: the
