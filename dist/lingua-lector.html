@@ -161,6 +161,14 @@
     font-family: var(--serif);
     color: var(--ink);
     height: 100%;
+    /* Turns off the browser's own pull-to-refresh. Reported from Edge on
+       Android: dragging the analysis sheet downwards to dismiss it reloaded
+       the page instead -- the gesture reached the document because the sheet
+       was already scrolled to its top, and a page reload in the middle of
+       reading is about the most destructive thing a stray gesture can do
+       here. Nothing in this app is refreshed by pulling down, so there is no
+       behaviour to preserve. */
+    overscroll-behavior-y: none;
   }
 
   .app {
@@ -567,10 +575,30 @@
     font-family: var(--sans);
     box-shadow: -6px 0 24px var(--shadow);
     transition: flex-basis .2s ease;
+    /* One scroll container for the whole panel, in every layout. The quoted
+       sentence used to sit in a fixed block above an independently scrolling
+       body, which meant two scrollbars and -- since this tool exists for
+       sentences that are NOT short -- a long quote permanently eating the
+       space the analysis needed. Everything below the header now scrolls
+       together. */
+    overflow-y: auto;
+    /* Reaching the top or bottom of the analysis must not start scrolling the
+       reader behind it, and on a phone must not hand the drag to the browser's
+       pull-to-refresh either (see html, body above -- this stops the chain one
+       level earlier, at the sheet itself). */
+    overscroll-behavior: contain;
   }
   .panel.collapsed { flex: 0 0 0; max-width: 0; overflow: hidden; border-left: none; box-shadow: none; }
 
+  /* Sticky, because it is now the only thing that does not scroll away: the
+     dismiss control has to stay reachable no matter how far down the analysis
+     the reader is. position also makes it the containing block for the
+     absolutely-positioned grip below. */
   .panel-header {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: var(--panel-bg);
     padding: 20px 22px 14px;
     border-bottom: 1px solid var(--rule);
     display: flex;
@@ -608,7 +636,13 @@
 
   /* Drag handle for the bottom-sheet layout. Invisible and inert outside it
      (no touch-action override, no listeners attached -- see wirePanelDrag()
-     in part6, which itself no-ops outside the portrait breakpoint). */
+     in part5, which itself no-ops outside the portrait breakpoint).
+     It lives inside .panel-header in the markup, but must never participate
+     in that header's flex row: as a flex item its `margin: auto` shoved the
+     "Sentence analysis" title into the top-right corner and left the bar
+     itself floating at the left of the title, which is exactly what the
+     bottom sheet was reported as looking like. It is positioned out of flow
+     in the portrait rules instead. */
   .panel-grip { display: none; }
 
   .panel-quote {
@@ -621,10 +655,10 @@
     background: linear-gradient(180deg, var(--paper), var(--panel-bg));
   }
 
-  /* padding-top is 0 so the sticky .section-tabs bar can sit flush against the
-     scrollport top; without that, text scrolling through the 4px gap above it
-     was visible. Blocks that need breathing room bring their own spacing. */
-  .panel-body { flex: 1; overflow-y: auto; padding: 0 22px 32px; }
+  /* .panel is the scroll container (see above), so this must not be a second
+     one, and must not be flex:1 either -- that would cap it at the panel's
+     height instead of letting it grow and push the shared scrollbar. */
+  .panel-body { flex: none; overflow-y: visible; padding: 0 22px 32px; }
   .panel-empty {
     padding: 60px 22px;
     text-align: center;
@@ -633,19 +667,19 @@
     line-height: 1.7;
   }
 
-  /* The tab bar is sticky, so the analysis text scrolls *underneath* it. Its
-     spacing must therefore be padding, not margin: a transparent margin band
-     above/below let the scrolling text show through the gap between the two
-     tab buttons and just under the bar. Padding is painted, so the bar stays
-     an opaque strip in all three themes. */
+  /* Not sticky: with the quote and the tabs sharing the panel's single
+     scrollbar, a sticky tab bar would need to know the sticky header's exact
+     height to offset against, and that height differs per breakpoint and per
+     UI language. Scrolling with the content is both simpler and what the
+     bottom sheet already did.
+     Spacing is padding rather than margin regardless: this bar is painted in
+     three themes and a transparent band would show the text sliding past
+     between the two buttons. */
   .section-tabs {
     display: flex;
     gap: 6px;
-    position: sticky;
-    top: 0;
     background: var(--panel-bg);
     padding: 16px 0 10px;
-    z-index: 2;
   }
   .tab-btn {
     flex: 1;
@@ -976,6 +1010,50 @@
     margin-top: 8px;
     min-height: 18px;
   }
+  /* Only ever on screen when the reader put ?debug=1 in the URL themselves
+     (see DEBUG_OVERLAY). Deliberately plain and unthemed -- it is a
+     diagnostic, not part of the product, and it must stay readable even when
+     whatever it is diagnosing has broken the page's own styling. */
+  #debug-overlay {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 9999;
+    max-height: 40vh;
+    display: flex;
+    flex-direction: column;
+    background: #101010;
+    color: #d8d8d8;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+    border-top: 1px solid #444;
+  }
+  .debug-overlay-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-bottom: 1px solid #333;
+  }
+  .debug-overlay-bar span { flex: 1; letter-spacing: .1em; text-transform: uppercase; }
+  .debug-overlay-bar button {
+    min-height: 32px;
+    padding: 4px 10px;
+    background: #262626;
+    color: #d8d8d8;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .debug-overlay-body {
+    flex: 1;
+    margin: 0;
+    padding: 6px 8px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
   .import-status.error { color: var(--danger); }
   .import-status.success { color: var(--success-ink); }
 
@@ -996,34 +1074,48 @@
     .panel {
       flex: none; max-width: none; width: 100%; height: 82vh;
       border-left: none; border-top: 1px solid var(--rule); order: 2;
-      /* The panel itself is now the one scroll container (see below), so its
-         height can be driven directly by drag -- see wirePanelDrag(). */
-      overflow-y: auto;
     }
-    .panel.collapsed { height: 0; flex: none; max-width: none; width: 100%; }
+    /* !important because a drag leaves an inline pixel height on the element
+       (see wirePanelDrag), and an inline height beats a class rule: without
+       this, dismissing the sheet after ever having dragged it did nothing at
+       all until the page was reloaded. togglePanel() also clears the inline
+       height, so this is the second of two locks on the same door -- the one
+       that keeps working if some future code path sets a height without
+       going through the toggle. */
+    .panel.collapsed { height: 0 !important; flex: none; max-width: none; width: 100%; }
     .reader-wrap { order: 1; height: auto; flex: 1 1 auto; }
 
     .panel-close-icon-side { display: none; }
     .panel-close-icon-sheet { display: inline; }
 
+    /* Out of the header's flex flow (see the base rule for what being a flex
+       item did to the title), and a full-width strip rather than a 36x4 bar:
+       the visible bar is drawn by ::before, while the element itself is a
+       22px-tall grab area spanning the sheet, which is what makes it
+       catchable with a thumb. The header reserves that height with its own
+       padding-top so nothing sits underneath it. */
     .panel-grip {
       display: block;
-      width: 36px; height: 4px;
-      margin: 8px auto 0;
+      position: absolute;
+      left: 0; right: 0; top: 0; height: 22px;
+      touch-action: none; /* the handle owns vertical drags; no scroll-chaining fight */
+    }
+    .panel-grip::before {
+      content: '';
+      position: absolute;
+      left: 50%; top: 8px;
+      transform: translateX(-50%);
+      width: 40px; height: 4px;
       border-radius: 2px;
       background: var(--rule);
-      touch-action: none; /* the handle owns vertical drags; no scroll-chaining fight */
     }
 
     /* The header's job here is just "grip + title + dismiss", so it can be
        much smaller than the sidebar version -- padding, not font tricks, is
-       most of what made it feel oversized. Sticky rather than a plain
-       non-scrolling block: with the quote now part of the scrolling content
-       below (next rule), something has to stay reachable at the top. */
+       most of what made it feel oversized. The top padding is what keeps the
+       title and dismiss button clear of the grip strip above them. */
     .panel-header {
-      position: sticky; top: 0; z-index: 3;
-      background: var(--panel-bg);
-      padding: 2px 14px 6px;
+      padding: 24px 14px 6px;
     }
     .panel-header h2 { font-size: 12px; }
     .panel-close { min-height: 40px; min-width: 40px; padding: 6px; }
@@ -1035,15 +1127,7 @@
        scrolls away with everything else instead of claiming a permanent slice
        of a screen that's already small. */
     .panel-quote { padding: 8px 16px; font-size: 14.5px; }
-
-    /* .panel is the scroll container now, not this -- see .panel above. */
-    .panel-body { flex: none; overflow-y: visible; }
-
-    /* Was sticky to stay reachable inside a cramped independent scroll area;
-       that constraint is gone now that the whole sheet can be dragged tall,
-       so it can just scroll past like the rest of the content instead of
-       needing a second sticky offset stacked under the header. */
-    .section-tabs { position: static; }
+    .panel-body { padding-left: 16px; padding-right: 16px; }
   }
 
   /* Landscape phones: more width than height to spare, so this keeps the
@@ -1088,6 +1172,20 @@
       display: inline-flex;
       align-items: center;
       font-size: 13.5px;
+    }
+
+    /* The three provider names are just wide enough that the last one
+       ("Google Gemini") wraps alone onto a second line, which reads as a
+       layout accident rather than a choice. Stacking all three full-width
+       makes the row deliberate and the targets easier to hit. Only this
+       group: the language rows have a dozen-plus short chips each and would
+       become an absurd column. */
+    #provider-chips {
+      display: grid;
+      grid-template-columns: 1fr;
+    }
+    #provider-chips .radio-chip {
+      justify-content: center;
     }
     .tab-btn { min-height: 44px; }
 
@@ -1318,7 +1416,12 @@
       <div class="settings-tab-panel" data-settings-tab="lang">
         <div class="field-group">
           <label data-i18n="settings.uiLangLabel">界面语言</label>
-          <select id="ui-lang-select"></select>
+          <!-- Chips rather than a dropdown, so that all three language settings on
+               this tab look and work the same way. The options are the same
+               kind of thing (a language, roughly a dozen of them) and there
+               is no reason for one of them to be a dropdown. Filled in by
+               populateUiLangChips() from UI_LANGS. -->
+          <div class="radio-row" id="ui-lang-chips"></div>
         </div>
 
         <div class="field-group">
@@ -1579,9 +1682,24 @@ const PROXY_CONFIG = (typeof window !== 'undefined' && window.LINGUA_LECTOR_PROX
 // starting the server with the flag.
 const DEBUG_ENDPOINT = (PROXY_CONFIG && PROXY_CONFIG.debugLog) || null;
 
+// Second way in, for the case server.py cannot reach: the page is on GitHub
+// Pages (or was mailed to someone as a single file) and there is no local
+// server to post to, so the probes have nowhere to send anything. `?debug=1`
+// turns the same probes on and prints them into an overlay on the page
+// instead, with a button to copy the whole log out -- which is something a
+// reporter on a phone can actually do.
+//
+// It deliberately does NOT set DEBUG_ENDPOINT: a URL parameter must never be
+// able to make the page start posting to a network endpoint. Off unless the
+// reader types it into their own address bar, and gone on the next reload.
+const DEBUG_OVERLAY = (typeof location !== 'undefined'
+  && /(^|[?&])debug=1(&|$)/.test(location.search || ''));
+
 function debugLog(event, data) {
-  if (!DEBUG_ENDPOINT) return;
+  if (!DEBUG_ENDPOINT && !DEBUG_OVERLAY) return;
   const payload = JSON.stringify({ t: Math.round(performance.now()), event, ...data });
+  if (DEBUG_OVERLAY) debugOverlayAppend(payload);
+  if (!DEBUG_ENDPOINT) return;
   // sendBeacon survives the page being navigated away or backgrounded, which a
   // fetch() from a click handler does not.
   if (navigator.sendBeacon) {
@@ -1589,6 +1707,68 @@ function debugLog(event, data) {
     return;
   }
   fetch(DEBUG_ENDPOINT, { method: 'POST', body: payload, keepalive: true }).catch(() => {});
+}
+
+// On-page sink for ?debug=1. Built lazily on the first line so that a build
+// which never logs anything never touches the DOM at all.
+const DEBUG_OVERLAY_MAX_LINES = 200;
+let debugOverlayLines = [];
+let debugOverlayBody = null;
+
+function debugOverlayAppend(line) {
+  debugOverlayLines.push(line);
+  // A tap probe fires several times a second; without a cap a long session
+  // ends with an overlay holding more text than the book.
+  if (debugOverlayLines.length > DEBUG_OVERLAY_MAX_LINES) debugOverlayLines.shift();
+  if (typeof document === 'undefined' || !document.body) return;
+  if (!debugOverlayBody) buildDebugOverlay();
+  if (!debugOverlayBody) return;
+  debugOverlayBody.textContent = debugOverlayLines.join('\n');
+  debugOverlayBody.scrollTop = debugOverlayBody.scrollHeight;
+}
+
+function buildDebugOverlay() {
+  const box = document.createElement('div');
+  box.id = 'debug-overlay';
+  const bar = document.createElement('div');
+  bar.className = 'debug-overlay-bar';
+  const label = document.createElement('span');
+  label.textContent = 'debug';
+  bar.appendChild(label);
+
+  // The whole point on a phone: get the log off the device and into a bug
+  // report. execCommand is the fallback because the async clipboard API needs
+  // a secure context, and file:// is not one.
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.textContent = 'copy';
+  copy.addEventListener('click', () => {
+    const text = debugOverlayLines.join('\n');
+    const done = () => { copy.textContent = 'copied'; setTimeout(() => { copy.textContent = 'copy'; }, 1200); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => {});
+      return;
+    }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); } catch (e) { /* nothing else to try */ }
+    ta.remove();
+  });
+  bar.appendChild(copy);
+
+  const hide = document.createElement('button');
+  hide.type = 'button';
+  hide.textContent = '×';
+  hide.addEventListener('click', () => box.remove());
+  bar.appendChild(hide);
+
+  debugOverlayBody = document.createElement('pre');
+  debugOverlayBody.className = 'debug-overlay-body';
+  box.appendChild(bar);
+  box.appendChild(debugOverlayBody);
+  document.body.appendChild(box);
 }
 
 function proxyInfoFor(provider) {
@@ -4749,7 +4929,7 @@ async function extractEpubChapters(arrayBuffer) {
         if (lead.length) {
           const prevChapter = chapters[chapters.length - 1];
           if (prevChapter) prevChapter.paragraphs = prevChapter.paragraphs.concat(lead);
-          else chapters.push({ id: 'epub-lead-' + href, title: '', dateRange: '', paragraphs: lead });
+          else chapters.push({ id: 'epub-lead-' + href, title: '', dateRange: '', paragraphs: lead, sharedFile: entries.length > 1 });
         }
       }
 
@@ -4763,14 +4943,65 @@ async function extractEpubChapters(arrayBuffer) {
           title: withPos[i].label || (metadata && metadata.title) || '',
           dateRange: '',
           paragraphs,
+          // Only slices cut out of a file that several TOC entries share are
+          // eligible for the fragment merge below -- see mergeAnchorFragments.
+          sharedFile: withPos.length > 1,
         });
       }
     } finally {
       if (section.unload) section.unload();
     }
   }
+  mergeAnchorFragments(chapters);
+  chapters.forEach(c => { delete c.sharedFile; });
   if (!chapters.length) throw new Error(t('import.noText'));
   return { bookTitle: (metadata && metadata.title) || '', chapters };
+}
+
+// A slice this short is a heading line or a byline, not a chapter.
+const EPUB_FRAGMENT_MAX_CHARS = 400;
+
+// Gutenberg's converter routinely registers a separate TOC anchor for every
+// line of a title page, so slicing a shared file at its anchors (which is what
+// stops those entries from each getting a copy of the whole file) yields a run
+// of one-line "chapters" before the real text: Caesar's De Bello Gallico opens
+// with four of them ("", "CAESAR'S COMMENTARIES IN LATIN", "BOOKS I-IV",
+// "Contents") ahead of the four books that are the actual content.
+//
+// Those slices are folded into the chapter that follows them rather than
+// dropped -- nothing the file contained may go missing, and the discarded
+// label is in practice also the slice's own first paragraph, so it survives as
+// text. The last chapter has nothing after it, so it folds backwards instead.
+//
+// Two deliberate limits keep this from touching books that are already
+// correct:
+//   - only slices from a file that MORE THAN ONE TOC entry points into are
+//     eligible. One file per chapter is the normal layout and cannot produce
+//     this problem, so those books are not examined at all -- a genuinely
+//     short chapter of its own (a dedication, a short poem) keeps its place
+//     in the chapter list.
+//   - the threshold is a few lines of text, not "shorter than its neighbours":
+//     a relative test would start eating real chapters out of any book with
+//     uneven chapter lengths.
+function mergeAnchorFragments(chapters) {
+  // Backwards, so that a run of consecutive fragments collapses in one pass:
+  // by the time a fragment is examined, everything it would merge into has
+  // already been resolved.
+  for (let i = chapters.length - 1; i >= 0; i--) {
+    const c = chapters[i];
+    if (!c.sharedFile) continue;
+    if (c.paragraphs.join('').length > EPUB_FRAGMENT_MAX_CHARS) continue;
+    const next = chapters[i + 1];
+    const prev = chapters[i - 1];
+    if (next) {
+      next.paragraphs = c.paragraphs.concat(next.paragraphs);
+    } else if (prev) {
+      prev.paragraphs = prev.paragraphs.concat(c.paragraphs);
+    } else {
+      continue; // the whole book is one short slice; leave it alone
+    }
+    chapters.splice(i, 1);
+  }
 }
 
 // ============================================================
@@ -6069,6 +6300,13 @@ function clearActiveSentence() {
 
 function togglePanel() {
   panelEl.classList.toggle('collapsed');
+  // A bottom-sheet drag leaves an inline pixel height behind, and an inline
+  // height wins over .panel.collapsed's. Left in place, dismissing the sheet
+  // set the class and changed nothing on screen -- the panel stayed exactly
+  // where it was until the page was reloaded, which is how it was reported.
+  // Clearing it here also means reopening starts from the CSS default height
+  // rather than resuming whatever the last drag happened to leave.
+  panelEl.style.height = '';
   const btn = document.getElementById('btn-toggle-panel');
   const collapsed = panelEl.classList.contains('collapsed');
   btn.textContent = collapsed ? t('toolbar.showSidebar') : t('toolbar.hideSidebar');
@@ -6530,6 +6768,8 @@ ${transLabel}〈这里填这句话完整、通顺、自然的整句翻译〉
 - 每个词条格式：*原词* — 释义，然后**只**按这个词自己的词性附加下面对应的一条信息。
   - 每个词条只属于一个词性。不属于的那些类别**整条略去、一个字都不要写**，禁止出现「动词：不适用」「无比较级」「N/A」「—」这类占位说明，也不要生造不存在的变化形式。
   - **「原词」写的是这个词的词典引用形式（词典原形），不是它在原句里出现的屈折/变位形式**，两者不一致时以原形为准：动词写不定式（分离动词要把分离前缀合并回去——原句写的是被拆开的变位形式 *nahmen … aus*，词条仍要写成原形 *ausnehmen*，不要写变位形式，也不要漏掉前缀）；名词写主格单数；形容词写原级（比较级/最高级要还原）。原句里那个具体屈折形式如果本身值得一提（不规则变位、罕见的格等），放进释义里说明，不要让词条本身停在屈折形式上。
+  - **引用形式按被分析语言自己的词典惯例来定，不要照搬其他语言的惯例。** 拉丁语词典用第一人称单数现在时作动词词头（*confero*、*succedo*），不是不定式；拉丁语名词用主格单数（*phalanx*、*carrus*），不是词干。
+  - **词条必须是这门语言里真实存在的完整单词**，不能是截断的词干或拼凑出来的形式（*phalange* 的词条是 *phalanx*，不是 *phalang*）；并且词条必须和你在同一条里给出的变化形式是**同一个词**——括号里写了 *confero, contuli, collatum*，词条就不能写成 *infero*。
   - 名词：给出该语言的语法性，并且**只写这个词实际的那一个定冠词**。德语的定冠词是 der、die、das 三者之一，必须三选一：Erdbeben 是中性，就只写 das，写成「der/das」或列出多个是错的。（法语、俄语等按该语言的阳性/阴性/中性体例；中文、英文等没有语法性的语言，这一项整条略去。）此外给出复数形式。
   - 动词：标出该语言里对识别这个词有帮助的核心变位形式（例如德语给出第三人称单数现在时、过去式 Präteritum、过去分词 Partizip II 三种形式；其他语言按该语言惯例给出对应的原形/变位提示）。
   - 形容词等其他词性：如有值得注意的变格/比较级等形式也可以简要补充，没有就不提。
@@ -6818,17 +7058,20 @@ async function sendFollowUp(result, followUpText) {
 // ============================================================
 // UI language switcher
 // ============================================================
-function populateUiLangSelect() {
-  const sel = document.getElementById('ui-lang-select');
-  if (!sel) return;
-  sel.innerHTML = '';
+function populateUiLangChips() {
+  const row = document.getElementById('ui-lang-chips');
+  if (!row) return;
+  const active = resolveUiLang();
+  row.innerHTML = '';
   UI_LANGS.forEach(code => {
-    const opt = document.createElement('option');
-    opt.value = code;
-    opt.textContent = UI_LANG_NAMES[code] || code;
-    sel.appendChild(opt);
+    const chip = document.createElement('div');
+    chip.className = 'radio-chip' + (code === active ? ' selected' : '');
+    chip.dataset.uilang = code;
+    // Each language is named in itself, so the chip stays recognisable to
+    // someone who cannot read the language the UI is currently in.
+    chip.textContent = UI_LANG_NAMES[code] || code;
+    row.appendChild(chip);
   });
-  sel.value = resolveUiLang();
 }
 
 function refreshUiLanguage() {
@@ -6840,11 +7083,13 @@ function refreshUiLanguage() {
   populateChapterSelect();
 }
 
-function wireUiLangSelect() {
-  const sel = document.getElementById('ui-lang-select');
-  if (!sel) return;
-  sel.addEventListener('change', (e) => {
-    settings.uiLang = e.target.value;
+// Applies (and saves) immediately on pick rather than waiting for Save, which
+// is what the old <select> did too: the whole dialog is written in the
+// language being chosen, so seeing the change at once is the confirmation
+// that the right one was picked.
+function wireUiLangChips() {
+  wireRadioGroup('ui-lang-chips', (chip) => {
+    settings.uiLang = chip.dataset.uilang;
     saveSettingsToLocalStorage();
     refreshUiLanguage();
   });
@@ -7020,6 +7265,9 @@ function syncSettingsFormFromState() {
 
   document.getElementById('paras-per-page-input').value = settings.parasPerPage || 8;
 
+  document.querySelectorAll('#ui-lang-chips .radio-chip').forEach(chip => {
+    chip.classList.toggle('selected', chip.dataset.uilang === resolveUiLang());
+  });
   document.querySelectorAll('#lang-rule-chips .radio-chip').forEach(chip => {
     chip.classList.toggle('selected', chip.dataset.lang === settings.sentenceLang);
   });
@@ -7310,7 +7558,7 @@ function wireTitleFields() {
 // something other than the sentence, an invisible element is covering it and the
 // whole search moves to CSS.
 function installDebugProbes() {
-  if (!DEBUG_ENDPOINT) return;
+  if (!DEBUG_ENDPOINT && !DEBUG_OVERLAY) return;
 
   window.addEventListener('error', (e) => {
     debugLog('error', { msg: e.message, stack: (e.error && e.error.stack) || '' });
@@ -7375,8 +7623,8 @@ wirePanelDrag();
   adoptProxyProviderIfNeeded();
   applyTheme();
   applyFont();
-  populateUiLangSelect();
-  wireUiLangSelect();
+  populateUiLangChips();
+  wireUiLangChips();
   applyI18n();
 
   await loadInitialDocument();

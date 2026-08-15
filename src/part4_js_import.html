@@ -787,7 +787,7 @@ async function extractEpubChapters(arrayBuffer) {
         if (lead.length) {
           const prevChapter = chapters[chapters.length - 1];
           if (prevChapter) prevChapter.paragraphs = prevChapter.paragraphs.concat(lead);
-          else chapters.push({ id: 'epub-lead-' + href, title: '', dateRange: '', paragraphs: lead });
+          else chapters.push({ id: 'epub-lead-' + href, title: '', dateRange: '', paragraphs: lead, sharedFile: entries.length > 1 });
         }
       }
 
@@ -801,14 +801,65 @@ async function extractEpubChapters(arrayBuffer) {
           title: withPos[i].label || (metadata && metadata.title) || '',
           dateRange: '',
           paragraphs,
+          // Only slices cut out of a file that several TOC entries share are
+          // eligible for the fragment merge below -- see mergeAnchorFragments.
+          sharedFile: withPos.length > 1,
         });
       }
     } finally {
       if (section.unload) section.unload();
     }
   }
+  mergeAnchorFragments(chapters);
+  chapters.forEach(c => { delete c.sharedFile; });
   if (!chapters.length) throw new Error(t('import.noText'));
   return { bookTitle: (metadata && metadata.title) || '', chapters };
+}
+
+// A slice this short is a heading line or a byline, not a chapter.
+const EPUB_FRAGMENT_MAX_CHARS = 400;
+
+// Gutenberg's converter routinely registers a separate TOC anchor for every
+// line of a title page, so slicing a shared file at its anchors (which is what
+// stops those entries from each getting a copy of the whole file) yields a run
+// of one-line "chapters" before the real text: Caesar's De Bello Gallico opens
+// with four of them ("", "CAESAR'S COMMENTARIES IN LATIN", "BOOKS I-IV",
+// "Contents") ahead of the four books that are the actual content.
+//
+// Those slices are folded into the chapter that follows them rather than
+// dropped -- nothing the file contained may go missing, and the discarded
+// label is in practice also the slice's own first paragraph, so it survives as
+// text. The last chapter has nothing after it, so it folds backwards instead.
+//
+// Two deliberate limits keep this from touching books that are already
+// correct:
+//   - only slices from a file that MORE THAN ONE TOC entry points into are
+//     eligible. One file per chapter is the normal layout and cannot produce
+//     this problem, so those books are not examined at all -- a genuinely
+//     short chapter of its own (a dedication, a short poem) keeps its place
+//     in the chapter list.
+//   - the threshold is a few lines of text, not "shorter than its neighbours":
+//     a relative test would start eating real chapters out of any book with
+//     uneven chapter lengths.
+function mergeAnchorFragments(chapters) {
+  // Backwards, so that a run of consecutive fragments collapses in one pass:
+  // by the time a fragment is examined, everything it would merge into has
+  // already been resolved.
+  for (let i = chapters.length - 1; i >= 0; i--) {
+    const c = chapters[i];
+    if (!c.sharedFile) continue;
+    if (c.paragraphs.join('').length > EPUB_FRAGMENT_MAX_CHARS) continue;
+    const next = chapters[i + 1];
+    const prev = chapters[i - 1];
+    if (next) {
+      next.paragraphs = c.paragraphs.concat(next.paragraphs);
+    } else if (prev) {
+      prev.paragraphs = prev.paragraphs.concat(c.paragraphs);
+    } else {
+      continue; // the whole book is one short slice; leave it alone
+    }
+    chapters.splice(i, 1);
+  }
 }
 
 // ============================================================

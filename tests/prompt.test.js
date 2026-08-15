@@ -124,6 +124,25 @@ module.exports = ({ describe, it, assert }) => {
         'prompt should carry a worked example of reassembling a separable verb');
     });
 
+    // Found by running the prompt over real Latin (Caesar, De Bello Gallico):
+    // "動詞寫不定式" is the German/English dictionary convention, and Latin
+    // dictionaries head verbs with the 1sg present instead. Told to produce an
+    // infinitive for `contulerunt`, the model produced neither -- it emitted
+    // *infero* while printing the correct principal parts of *confero* in the
+    // same entry, and turned the ablative `phalange` into the non-word
+    // *phalang*.
+    it('ties the headword convention to the language being analysed', () => {
+      const { get } = loadApp();
+      const prompt = get('buildSystemPrompt')();
+      assert.ok(/词典惯例/.test(prompt), 'prompt must defer to the language\'s own citation convention');
+      assert.ok(/第一人称单数现在时/.test(prompt) && /不是不定式/.test(prompt),
+        'prompt must give the Latin verb convention explicitly');
+      assert.ok(/phalanx/.test(prompt) && /phalang\b/.test(prompt),
+        'prompt should carry the observed truncated-stem counterexample');
+      assert.ok(/同一个词/.test(prompt),
+        'prompt must require the headword and its listed forms to be the same word');
+    });
+
     it('defines a subordinate clause by its finite verb', () => {
       const { get } = loadApp();
       const prompt = get('buildSystemPrompt')();

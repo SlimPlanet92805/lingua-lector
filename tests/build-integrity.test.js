@@ -102,11 +102,18 @@ module.exports = ({ describe, it, assert }) => {
     // which has no devtools. The distributed file must never use it -- it is
     // armed only by the endpoint server.py --debug-log injects at serve time.
     it('ships with the diagnostics channel disarmed', () => {
-      const { get } = loadApp();
+      const { get, html } = loadApp();
       assert.equal(get('DEBUG_ENDPOINT'), null, 'a plain build must have no debug endpoint');
       // And debugLog must be a no-op rather than throwing, since it is called
       // on every sentence click.
       assert.equal(get('debugLog')('probe', { a: 1 }), undefined);
+      // ?debug=1 is an on-page overlay only. If it ever came to feed
+      // DEBUG_ENDPOINT, a link with that parameter would be enough to make
+      // someone else's browser start posting their reading session somewhere.
+      assert.ok(/DEBUG_ENDPOINT = \(PROXY_CONFIG/.test(html),
+        'the endpoint must come from the proxy config and nothing else');
+      assert.ok(!/debug=1[\s\S]{0,400}DEBUG_ENDPOINT =/.test(html),
+        '?debug=1 must not be able to set the network endpoint');
     });
 
     it('references only element ids that exist for every data-i18n target', () => {

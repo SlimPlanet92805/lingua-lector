@@ -71,6 +71,26 @@ subordination. Taking that apart is what the tool does:
 
 ![the longest sentence, analysed](docs/longest-sentence-analysis.png)
 
+## "Can't I just paste the sentence into ChatGPT?"
+
+For one sentence, yes — and the answer will be about as good, because Lingua Lector is
+asking a model too. The difference shows up on the two hundredth sentence, which is where
+reading a book actually happens.
+
+- **You don't have to produce the sentence.** Selecting one clean sentence out of a PDF
+  means fighting hyphenation, running headers, footnote markers and line breaks every
+  single time. Here you load the file once and every sentence in it is already a click.
+- **You don't pay for the same sentence twice.** Analyses are cached per document, so
+  re-reading a chapter, or coming back to a hard paragraph a week later, costs nothing.
+- **The surrounding paragraph goes along automatically.** Pronouns and back-references
+  resolve without you assembling the context by hand.
+- **It remembers where you were.** Your library, your chapter, your page — not a chat log
+  you have to scroll back through to find last night's sentence.
+- **Follow-up questions stay anchored to that sentence.** Ask "why subjunctive here?" and
+  it is still about the sentence in front of you, in a thread that belongs to it.
+
+Same underlying model, wrapped in the workflow that close reading actually needs.
+
 ## Features
 
 - **Sentence-level analysis with follow-ups**: a translation of the whole sentence, its

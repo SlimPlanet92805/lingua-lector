@@ -161,6 +161,14 @@
     font-family: var(--serif);
     color: var(--ink);
     height: 100%;
+    /* Turns off the browser's own pull-to-refresh. Reported from Edge on
+       Android: dragging the analysis sheet downwards to dismiss it reloaded
+       the page instead -- the gesture reached the document because the sheet
+       was already scrolled to its top, and a page reload in the middle of
+       reading is about the most destructive thing a stray gesture can do
+       here. Nothing in this app is refreshed by pulling down, so there is no
+       behaviour to preserve. */
+    overscroll-behavior-y: none;
   }
 
   .app {
@@ -567,10 +575,30 @@
     font-family: var(--sans);
     box-shadow: -6px 0 24px var(--shadow);
     transition: flex-basis .2s ease;
+    /* One scroll container for the whole panel, in every layout. The quoted
+       sentence used to sit in a fixed block above an independently scrolling
+       body, which meant two scrollbars and -- since this tool exists for
+       sentences that are NOT short -- a long quote permanently eating the
+       space the analysis needed. Everything below the header now scrolls
+       together. */
+    overflow-y: auto;
+    /* Reaching the top or bottom of the analysis must not start scrolling the
+       reader behind it, and on a phone must not hand the drag to the browser's
+       pull-to-refresh either (see html, body above -- this stops the chain one
+       level earlier, at the sheet itself). */
+    overscroll-behavior: contain;
   }
   .panel.collapsed { flex: 0 0 0; max-width: 0; overflow: hidden; border-left: none; box-shadow: none; }
 
+  /* Sticky, because it is now the only thing that does not scroll away: the
+     dismiss control has to stay reachable no matter how far down the analysis
+     the reader is. position also makes it the containing block for the
+     absolutely-positioned grip below. */
   .panel-header {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: var(--panel-bg);
     padding: 20px 22px 14px;
     border-bottom: 1px solid var(--rule);
     display: flex;
@@ -608,7 +636,13 @@
 
   /* Drag handle for the bottom-sheet layout. Invisible and inert outside it
      (no touch-action override, no listeners attached -- see wirePanelDrag()
-     in part6, which itself no-ops outside the portrait breakpoint). */
+     in part5, which itself no-ops outside the portrait breakpoint).
+     It lives inside .panel-header in the markup, but must never participate
+     in that header's flex row: as a flex item its `margin: auto` shoved the
+     "Sentence analysis" title into the top-right corner and left the bar
+     itself floating at the left of the title, which is exactly what the
+     bottom sheet was reported as looking like. It is positioned out of flow
+     in the portrait rules instead. */
   .panel-grip { display: none; }
 
   .panel-quote {
@@ -621,10 +655,10 @@
     background: linear-gradient(180deg, var(--paper), var(--panel-bg));
   }
 
-  /* padding-top is 0 so the sticky .section-tabs bar can sit flush against the
-     scrollport top; without that, text scrolling through the 4px gap above it
-     was visible. Blocks that need breathing room bring their own spacing. */
-  .panel-body { flex: 1; overflow-y: auto; padding: 0 22px 32px; }
+  /* .panel is the scroll container (see above), so this must not be a second
+     one, and must not be flex:1 either -- that would cap it at the panel's
+     height instead of letting it grow and push the shared scrollbar. */
+  .panel-body { flex: none; overflow-y: visible; padding: 0 22px 32px; }
   .panel-empty {
     padding: 60px 22px;
     text-align: center;
@@ -633,19 +667,19 @@
     line-height: 1.7;
   }
 
-  /* The tab bar is sticky, so the analysis text scrolls *underneath* it. Its
-     spacing must therefore be padding, not margin: a transparent margin band
-     above/below let the scrolling text show through the gap between the two
-     tab buttons and just under the bar. Padding is painted, so the bar stays
-     an opaque strip in all three themes. */
+  /* Not sticky: with the quote and the tabs sharing the panel's single
+     scrollbar, a sticky tab bar would need to know the sticky header's exact
+     height to offset against, and that height differs per breakpoint and per
+     UI language. Scrolling with the content is both simpler and what the
+     bottom sheet already did.
+     Spacing is padding rather than margin regardless: this bar is painted in
+     three themes and a transparent band would show the text sliding past
+     between the two buttons. */
   .section-tabs {
     display: flex;
     gap: 6px;
-    position: sticky;
-    top: 0;
     background: var(--panel-bg);
     padding: 16px 0 10px;
-    z-index: 2;
   }
   .tab-btn {
     flex: 1;
@@ -976,6 +1010,50 @@
     margin-top: 8px;
     min-height: 18px;
   }
+  /* Only ever on screen when the reader put ?debug=1 in the URL themselves
+     (see DEBUG_OVERLAY). Deliberately plain and unthemed -- it is a
+     diagnostic, not part of the product, and it must stay readable even when
+     whatever it is diagnosing has broken the page's own styling. */
+  #debug-overlay {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 9999;
+    max-height: 40vh;
+    display: flex;
+    flex-direction: column;
+    background: #101010;
+    color: #d8d8d8;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+    border-top: 1px solid #444;
+  }
+  .debug-overlay-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-bottom: 1px solid #333;
+  }
+  .debug-overlay-bar span { flex: 1; letter-spacing: .1em; text-transform: uppercase; }
+  .debug-overlay-bar button {
+    min-height: 32px;
+    padding: 4px 10px;
+    background: #262626;
+    color: #d8d8d8;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .debug-overlay-body {
+    flex: 1;
+    margin: 0;
+    padding: 6px 8px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
   .import-status.error { color: var(--danger); }
   .import-status.success { color: var(--success-ink); }
 
@@ -996,34 +1074,48 @@
     .panel {
       flex: none; max-width: none; width: 100%; height: 82vh;
       border-left: none; border-top: 1px solid var(--rule); order: 2;
-      /* The panel itself is now the one scroll container (see below), so its
-         height can be driven directly by drag -- see wirePanelDrag(). */
-      overflow-y: auto;
     }
-    .panel.collapsed { height: 0; flex: none; max-width: none; width: 100%; }
+    /* !important because a drag leaves an inline pixel height on the element
+       (see wirePanelDrag), and an inline height beats a class rule: without
+       this, dismissing the sheet after ever having dragged it did nothing at
+       all until the page was reloaded. togglePanel() also clears the inline
+       height, so this is the second of two locks on the same door -- the one
+       that keeps working if some future code path sets a height without
+       going through the toggle. */
+    .panel.collapsed { height: 0 !important; flex: none; max-width: none; width: 100%; }
     .reader-wrap { order: 1; height: auto; flex: 1 1 auto; }
 
     .panel-close-icon-side { display: none; }
     .panel-close-icon-sheet { display: inline; }
 
+    /* Out of the header's flex flow (see the base rule for what being a flex
+       item did to the title), and a full-width strip rather than a 36x4 bar:
+       the visible bar is drawn by ::before, while the element itself is a
+       22px-tall grab area spanning the sheet, which is what makes it
+       catchable with a thumb. The header reserves that height with its own
+       padding-top so nothing sits underneath it. */
     .panel-grip {
       display: block;
-      width: 36px; height: 4px;
-      margin: 8px auto 0;
+      position: absolute;
+      left: 0; right: 0; top: 0; height: 22px;
+      touch-action: none; /* the handle owns vertical drags; no scroll-chaining fight */
+    }
+    .panel-grip::before {
+      content: '';
+      position: absolute;
+      left: 50%; top: 8px;
+      transform: translateX(-50%);
+      width: 40px; height: 4px;
       border-radius: 2px;
       background: var(--rule);
-      touch-action: none; /* the handle owns vertical drags; no scroll-chaining fight */
     }
 
     /* The header's job here is just "grip + title + dismiss", so it can be
        much smaller than the sidebar version -- padding, not font tricks, is
-       most of what made it feel oversized. Sticky rather than a plain
-       non-scrolling block: with the quote now part of the scrolling content
-       below (next rule), something has to stay reachable at the top. */
+       most of what made it feel oversized. The top padding is what keeps the
+       title and dismiss button clear of the grip strip above them. */
     .panel-header {
-      position: sticky; top: 0; z-index: 3;
-      background: var(--panel-bg);
-      padding: 2px 14px 6px;
+      padding: 24px 14px 6px;
     }
     .panel-header h2 { font-size: 12px; }
     .panel-close { min-height: 40px; min-width: 40px; padding: 6px; }
@@ -1035,15 +1127,7 @@
        scrolls away with everything else instead of claiming a permanent slice
        of a screen that's already small. */
     .panel-quote { padding: 8px 16px; font-size: 14.5px; }
-
-    /* .panel is the scroll container now, not this -- see .panel above. */
-    .panel-body { flex: none; overflow-y: visible; }
-
-    /* Was sticky to stay reachable inside a cramped independent scroll area;
-       that constraint is gone now that the whole sheet can be dragged tall,
-       so it can just scroll past like the rest of the content instead of
-       needing a second sticky offset stacked under the header. */
-    .section-tabs { position: static; }
+    .panel-body { padding-left: 16px; padding-right: 16px; }
   }
 
   /* Landscape phones: more width than height to spare, so this keeps the
@@ -1088,6 +1172,20 @@
       display: inline-flex;
       align-items: center;
       font-size: 13.5px;
+    }
+
+    /* The three provider names are just wide enough that the last one
+       ("Google Gemini") wraps alone onto a second line, which reads as a
+       layout accident rather than a choice. Stacking all three full-width
+       makes the row deliberate and the targets easier to hit. Only this
+       group: the language rows have a dozen-plus short chips each and would
+       become an absurd column. */
+    #provider-chips {
+      display: grid;
+      grid-template-columns: 1fr;
+    }
+    #provider-chips .radio-chip {
+      justify-content: center;
     }
     .tab-btn { min-height: 44px; }
 

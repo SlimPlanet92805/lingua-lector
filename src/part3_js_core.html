@@ -117,9 +117,24 @@ const PROXY_CONFIG = (typeof window !== 'undefined' && window.LINGUA_LECTOR_PROX
 // starting the server with the flag.
 const DEBUG_ENDPOINT = (PROXY_CONFIG && PROXY_CONFIG.debugLog) || null;
 
+// Second way in, for the case server.py cannot reach: the page is on GitHub
+// Pages (or was mailed to someone as a single file) and there is no local
+// server to post to, so the probes have nowhere to send anything. `?debug=1`
+// turns the same probes on and prints them into an overlay on the page
+// instead, with a button to copy the whole log out -- which is something a
+// reporter on a phone can actually do.
+//
+// It deliberately does NOT set DEBUG_ENDPOINT: a URL parameter must never be
+// able to make the page start posting to a network endpoint. Off unless the
+// reader types it into their own address bar, and gone on the next reload.
+const DEBUG_OVERLAY = (typeof location !== 'undefined'
+  && /(^|[?&])debug=1(&|$)/.test(location.search || ''));
+
 function debugLog(event, data) {
-  if (!DEBUG_ENDPOINT) return;
+  if (!DEBUG_ENDPOINT && !DEBUG_OVERLAY) return;
   const payload = JSON.stringify({ t: Math.round(performance.now()), event, ...data });
+  if (DEBUG_OVERLAY) debugOverlayAppend(payload);
+  if (!DEBUG_ENDPOINT) return;
   // sendBeacon survives the page being navigated away or backgrounded, which a
   // fetch() from a click handler does not.
   if (navigator.sendBeacon) {
@@ -127,6 +142,68 @@ function debugLog(event, data) {
     return;
   }
   fetch(DEBUG_ENDPOINT, { method: 'POST', body: payload, keepalive: true }).catch(() => {});
+}
+
+// On-page sink for ?debug=1. Built lazily on the first line so that a build
+// which never logs anything never touches the DOM at all.
+const DEBUG_OVERLAY_MAX_LINES = 200;
+let debugOverlayLines = [];
+let debugOverlayBody = null;
+
+function debugOverlayAppend(line) {
+  debugOverlayLines.push(line);
+  // A tap probe fires several times a second; without a cap a long session
+  // ends with an overlay holding more text than the book.
+  if (debugOverlayLines.length > DEBUG_OVERLAY_MAX_LINES) debugOverlayLines.shift();
+  if (typeof document === 'undefined' || !document.body) return;
+  if (!debugOverlayBody) buildDebugOverlay();
+  if (!debugOverlayBody) return;
+  debugOverlayBody.textContent = debugOverlayLines.join('\n');
+  debugOverlayBody.scrollTop = debugOverlayBody.scrollHeight;
+}
+
+function buildDebugOverlay() {
+  const box = document.createElement('div');
+  box.id = 'debug-overlay';
+  const bar = document.createElement('div');
+  bar.className = 'debug-overlay-bar';
+  const label = document.createElement('span');
+  label.textContent = 'debug';
+  bar.appendChild(label);
+
+  // The whole point on a phone: get the log off the device and into a bug
+  // report. execCommand is the fallback because the async clipboard API needs
+  // a secure context, and file:// is not one.
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.textContent = 'copy';
+  copy.addEventListener('click', () => {
+    const text = debugOverlayLines.join('\n');
+    const done = () => { copy.textContent = 'copied'; setTimeout(() => { copy.textContent = 'copy'; }, 1200); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => {});
+      return;
+    }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); } catch (e) { /* nothing else to try */ }
+    ta.remove();
+  });
+  bar.appendChild(copy);
+
+  const hide = document.createElement('button');
+  hide.type = 'button';
+  hide.textContent = '×';
+  hide.addEventListener('click', () => box.remove());
+  bar.appendChild(hide);
+
+  debugOverlayBody = document.createElement('pre');
+  debugOverlayBody.className = 'debug-overlay-body';
+  box.appendChild(bar);
+  box.appendChild(debugOverlayBody);
+  document.body.appendChild(box);
 }
 
 function proxyInfoFor(provider) {

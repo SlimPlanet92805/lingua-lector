@@ -4,17 +4,20 @@
 // ============================================================
 // UI language switcher
 // ============================================================
-function populateUiLangSelect() {
-  const sel = document.getElementById('ui-lang-select');
-  if (!sel) return;
-  sel.innerHTML = '';
+function populateUiLangChips() {
+  const row = document.getElementById('ui-lang-chips');
+  if (!row) return;
+  const active = resolveUiLang();
+  row.innerHTML = '';
   UI_LANGS.forEach(code => {
-    const opt = document.createElement('option');
-    opt.value = code;
-    opt.textContent = UI_LANG_NAMES[code] || code;
-    sel.appendChild(opt);
+    const chip = document.createElement('div');
+    chip.className = 'radio-chip' + (code === active ? ' selected' : '');
+    chip.dataset.uilang = code;
+    // Each language is named in itself, so the chip stays recognisable to
+    // someone who cannot read the language the UI is currently in.
+    chip.textContent = UI_LANG_NAMES[code] || code;
+    row.appendChild(chip);
   });
-  sel.value = resolveUiLang();
 }
 
 function refreshUiLanguage() {
@@ -26,11 +29,13 @@ function refreshUiLanguage() {
   populateChapterSelect();
 }
 
-function wireUiLangSelect() {
-  const sel = document.getElementById('ui-lang-select');
-  if (!sel) return;
-  sel.addEventListener('change', (e) => {
-    settings.uiLang = e.target.value;
+// Applies (and saves) immediately on pick rather than waiting for Save, which
+// is what the old <select> did too: the whole dialog is written in the
+// language being chosen, so seeing the change at once is the confirmation
+// that the right one was picked.
+function wireUiLangChips() {
+  wireRadioGroup('ui-lang-chips', (chip) => {
+    settings.uiLang = chip.dataset.uilang;
     saveSettingsToLocalStorage();
     refreshUiLanguage();
   });
@@ -206,6 +211,9 @@ function syncSettingsFormFromState() {
 
   document.getElementById('paras-per-page-input').value = settings.parasPerPage || 8;
 
+  document.querySelectorAll('#ui-lang-chips .radio-chip').forEach(chip => {
+    chip.classList.toggle('selected', chip.dataset.uilang === resolveUiLang());
+  });
   document.querySelectorAll('#lang-rule-chips .radio-chip').forEach(chip => {
     chip.classList.toggle('selected', chip.dataset.lang === settings.sentenceLang);
   });
@@ -496,7 +504,7 @@ function wireTitleFields() {
 // something other than the sentence, an invisible element is covering it and the
 // whole search moves to CSS.
 function installDebugProbes() {
-  if (!DEBUG_ENDPOINT) return;
+  if (!DEBUG_ENDPOINT && !DEBUG_OVERLAY) return;
 
   window.addEventListener('error', (e) => {
     debugLog('error', { msg: e.message, stack: (e.error && e.error.stack) || '' });
@@ -561,8 +569,8 @@ wirePanelDrag();
   adoptProxyProviderIfNeeded();
   applyTheme();
   applyFont();
-  populateUiLangSelect();
-  wireUiLangSelect();
+  populateUiLangChips();
+  wireUiLangChips();
   applyI18n();
 
   await loadInitialDocument();

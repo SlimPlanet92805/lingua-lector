@@ -171,7 +171,12 @@
       <div class="settings-tab-panel" data-settings-tab="lang">
         <div class="field-group">
           <label data-i18n="settings.uiLangLabel">界面语言</label>
-          <select id="ui-lang-select"></select>
+          <!-- Chips rather than a dropdown, so that all three language settings on
+               this tab look and work the same way. The options are the same
+               kind of thing (a language, roughly a dozen of them) and there
+               is no reason for one of them to be a dropdown. Filled in by
+               populateUiLangChips() from UI_LANGS. -->
+          <div class="radio-row" id="ui-lang-chips"></div>
         </div>
 
         <div class="field-group">
