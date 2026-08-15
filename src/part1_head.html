@@ -583,10 +583,19 @@
     flex-direction: column;
     font-family: var(--sans);
     box-shadow: -6px 0 24px var(--shadow);
-    transition: flex-basis .22s cubic-bezier(.22, .61, .36, 1);
+    transition: flex-basis .22s cubic-bezier(.22, .61, .36, 1),
+                border-left-width .22s cubic-bezier(.22, .61, .36, 1);
     overflow: hidden;
   }
-  .panel.collapsed { flex-basis: 0; max-width: 0; border-left: none; box-shadow: none; }
+  /* No `max-width: 0` here, and the border goes away by animating its width
+     rather than by being set to `none`. Both were snapping to their end value
+     on the first frame: max-width clamped the panel to zero width while
+     flex-basis was still at 420px, so closing the sidebar had no animation at
+     all -- the panel vanished and the text beside it jumped to its new width
+     in one frame, while opening (where max-width jumps *up* first, out of the
+     way) looked fine. flex-basis: 0 with flex-grow: 0 already gives a zero
+     width; nothing needs to be clamped. */
+  .panel.collapsed { flex-basis: 0; border-left-width: 0; box-shadow: none; }
 
   /* The scroll container: one for the whole panel, in every layout. The quoted
      sentence used to sit in a fixed block above an independently scrolling

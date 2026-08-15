@@ -1100,6 +1100,13 @@ function wirePanelDrag() {
   // measurement taken across that boundary can report the height the sheet is
   // animating *from* rather than the one the finger left it at.
   let draggedHeight = 0;
+  // Sampled over the last stretch of the gesture, in px/ms. A sheet that can
+  // only be dismissed by dragging it all the way past a position threshold
+  // feels dead: a quick flick downwards is how people expect to throw one of
+  // these away, and it should not matter that the finger let go halfway.
+  let velocity = 0;
+  let lastY = 0;
+  let lastT = 0;
 
   handle.addEventListener('pointerdown', (e) => {
     if (!isPanelSheet()) return;
@@ -1109,6 +1116,9 @@ function wirePanelDrag() {
     startY = e.clientY;
     startHeight = panelEl.getBoundingClientRect().height;
     draggedHeight = startHeight;
+    velocity = 0;
+    lastY = e.clientY;
+    lastT = e.timeStamp;
     // The height transition is for open/close; during a drag it would make
     // the sheet trail 220ms behind the finger.
     panelEl.classList.add('panel-dragging');
@@ -1122,12 +1132,43 @@ function wirePanelDrag() {
     const maxHeight = window.innerHeight * 0.94;
     draggedHeight = Math.min(maxHeight, Math.max(minHeight, startHeight + deltaY));
     panelEl.style.height = draggedHeight + 'px';
+
+    // Smoothed, so one jittery sample near the end of the gesture cannot
+    // decide the outcome on its own. Positive means the finger is moving down.
+    const dt = e.timeStamp - lastT;
+    if (dt > 0) {
+      const sample = (e.clientY - lastY) / dt;
+      velocity = velocity ? velocity * 0.4 + sample * 0.6 : sample;
+      lastY = e.clientY;
+      lastT = e.timeStamp;
+    }
   });
+
+  // px/ms. Roughly the slowest movement that still reads as a flick rather
+  // than as placing the sheet somewhere on purpose -- a deliberate drag runs
+  // well under this even when it covers a lot of distance.
+  const FLING_SPEED = 0.45;
 
   function endDrag() {
     if (!dragging) return;
     dragging = false;
     panelEl.classList.remove('panel-dragging');
+
+    // Thrown downwards: dismiss from wherever it is. Thrown upwards: take it
+    // to full height, which is the other thing a flick can mean and would
+    // otherwise require dragging the whole way by hand.
+    if (velocity > FLING_SPEED) {
+      panelEl.style.height = '';
+      if (!panelEl.classList.contains('collapsed')) togglePanel();
+      return;
+    }
+    if (velocity < -FLING_SPEED) {
+      panelEl.style.height = window.innerHeight * 0.94 + 'px';
+      return;
+    }
+    // Let go without much speed: where it ended up is what was meant, so the
+    // position threshold decides. Slightly above the drag floor, so that
+    // dragging it as far down as it goes and stopping still dismisses.
     if (draggedHeight <= window.innerHeight * 0.34) {
       panelEl.style.height = ''; // back to the CSS default for next time
       if (!panelEl.classList.contains('collapsed')) togglePanel();
