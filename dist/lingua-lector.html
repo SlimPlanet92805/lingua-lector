@@ -1006,6 +1006,25 @@
   .field-group input:focus, .field-group select:focus, .field-group textarea:focus {
     border-color: var(--accent-soft);
   }
+  /* API key fields are plain type="password" inputs, so whether a reveal
+     icon shows at all -- and whether it's inside or outside the field -- is
+     entirely up to the browser's own password-manager heuristics, which is
+     why it can appear and disappear across page loads. This button is the
+     app's own, so it's always there. */
+  .key-input-row { display: flex; gap: 6px; align-items: center; }
+  .key-input-row input { flex: 1; min-width: 0; }
+  .key-toggle-btn {
+    flex-shrink: 0;
+    border: 1px solid var(--rule);
+    background: none;
+    color: var(--ink-soft);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 9px 11px;
+    border-radius: 8px;
+  }
+  .key-toggle-btn:hover { background: var(--rule); color: var(--accent); }
   .field-row { display: flex; gap: 12px; }
   .field-row > * { flex: 1; }
 
@@ -1450,7 +1469,12 @@
             可在 <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> 申请。
             留空时会自动尝试假设本工具运行在 claude.ai 的 artifact 沙盒里（沙盒有自己的鉴权代理）。
           </div>
-          <input type="password" id="anthropic-key-input" placeholder="sk-ant-...">
+          <div class="key-input-row">
+            <input type="password" id="anthropic-key-input" placeholder="sk-ant-...">
+            <button type="button" class="key-toggle-btn" data-key-target="anthropic-key-input"
+                    data-i18n-label="settings.toggleKeyVisibility" data-i18n-title="settings.toggleKeyVisibility"
+                    aria-label="显示或隐藏已填写的 API key" title="显示或隐藏已填写的 API key">👁</button>
+          </div>
           <label style="margin-top:14px;" data-i18n="settings.modelLabel">模型</label>
           <input type="text" id="anthropic-model-input" list="anthropic-model-suggestions" placeholder="claude-sonnet-5">
           <datalist id="anthropic-model-suggestions">
@@ -1475,7 +1499,12 @@
             适用于 OpenAI 官方，以及任何暴露相同 <code>/chat/completions</code> 接口的兼容服务
             （DeepSeek、Groq、本地 Ollama 等）——把下面的接口地址换成对应服务的地址即可。
           </div>
-          <input type="password" id="openai-key-input" placeholder="sk-...">
+          <div class="key-input-row">
+            <input type="password" id="openai-key-input" placeholder="sk-...">
+            <button type="button" class="key-toggle-btn" data-key-target="openai-key-input"
+                    data-i18n-label="settings.toggleKeyVisibility" data-i18n-title="settings.toggleKeyVisibility"
+                    aria-label="显示或隐藏已填写的 API key" title="显示或隐藏已填写的 API key">👁</button>
+          </div>
           <label style="margin-top:14px;" data-i18n="settings.baseUrlLabel">接口地址（Base URL）</label>
           <input type="text" id="openai-baseurl-input" placeholder="https://api.openai.com/v1">
           <div class="field-desc hidden" data-proxy-hint="openai"></div>
@@ -1498,7 +1527,12 @@
           <div class="field-desc" data-i18n="settings.geminiDesc">
             可在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 申请。
           </div>
-          <input type="password" id="gemini-key-input" placeholder="AIza...">
+          <div class="key-input-row">
+            <input type="password" id="gemini-key-input" placeholder="AIza...">
+            <button type="button" class="key-toggle-btn" data-key-target="gemini-key-input"
+                    data-i18n-label="settings.toggleKeyVisibility" data-i18n-title="settings.toggleKeyVisibility"
+                    aria-label="显示或隐藏已填写的 API key" title="显示或隐藏已填写的 API key">👁</button>
+          </div>
           <label style="margin-top:14px;" data-i18n="settings.baseUrlLabel">接口地址（Base URL）</label>
           <input type="text" id="gemini-baseurl-input" placeholder="https://generativelanguage.googleapis.com/v1beta">
           <div class="field-desc hidden" data-proxy-hint="gemini"></div>
@@ -3011,6 +3045,7 @@ const I18N = {
     'settings.providerDesc': '每个服务商的 key / 模型 / 接口地址分开保存，切换服务商不会丢失其它服务商已填的信息。所有 key 只存在这台设备浏览器的本地存储（localStorage）中，不会上传到任何服务器（本工具没有后端）。请勿在公用/共享电脑上保存 key。',
     'settings.providerOpenaiCompatible': 'OpenAI 兼容',
     'settings.anthropicDesc': '可在 <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> 申请。留空时会自动尝试假设本工具运行在 claude.ai 的 artifact 沙盒里（沙盒有自己的鉴权代理）。',
+    'settings.toggleKeyVisibility': '显示或隐藏已填写的 API key',
     'settings.modelLabel': '模型',
     'settings.baseUrlOptionalLabel': '接口地址（可选，留空用官方地址）',
     'settings.anthropicWarning': 'ℹ️ 本工具已通过 <code>anthropic-dangerous-direct-browser-access</code> 请求头启用浏览器直连，正常情况下无需额外代理即可使用。但请注意：把 key 直接放进前端代码/浏览器本地存储，意味着任何能访问这台设备浏览器数据的人理论上都能取得这个 key。不要在公用/共享电脑上保存，不建议长期使用高额度 key，可在控制台单独为这个用途创建一个限额较低的 key。',
@@ -3149,6 +3184,7 @@ const I18N = {
     'settings.providerDesc': '每個服務商的 key / 模型 / 端點分開儲存，切換服務商不會遺失其他服務商已填的資訊。所有 key 只存在這台裝置瀏覽器的本機儲存（localStorage）中，不會上傳到任何伺服器（本工具沒有後端）。請勿在公用/共享電腦上儲存 key。',
     'settings.providerOpenaiCompatible': 'OpenAI 相容',
     'settings.anthropicDesc': '可在 <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> 申請。留空時會自動嘗試假設本工具運行在 claude.ai 的 artifact 沙盒裡（沙盒有自己的鑑權代理）。',
+    'settings.toggleKeyVisibility': '顯示或隱藏已填寫的 API key',
     'settings.modelLabel': '模型',
     'settings.baseUrlOptionalLabel': '接口地址（選填，留空使用官方地址）',
     'settings.anthropicWarning': 'ℹ️ 本工具已透過 <code>anthropic-dangerous-direct-browser-access</code> 請求標頭啟用瀏覽器直連，正常情況下無需額外代理即可使用。但請注意：把 key 直接放進前端程式碼/瀏覽器本機儲存，意味著任何能存取這台裝置瀏覽器資料的人理論上都能取得這個 key。不要在公用/共享電腦上儲存，不建議長期使用高額度 key，可在控制台單獨為這個用途建立一個限額較低的 key。',
@@ -3287,6 +3323,7 @@ const I18N = {
     'settings.providerDesc': "Each provider keeps its own key / model / endpoint, so switching providers won't lose what you entered for the others. All keys are stored only in this browser's local storage (localStorage) — this tool has no backend. Don't save keys on a shared/public computer.",
     'settings.providerOpenaiCompatible': 'OpenAI-compatible',
     'settings.anthropicDesc': 'Get one at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Leave blank to assume this tool is running inside the claude.ai artifact sandbox (which has its own auth proxy).',
+    'settings.toggleKeyVisibility': 'Show or hide the entered API key',
     'settings.modelLabel': 'Model',
     'settings.baseUrlOptionalLabel': 'Endpoint (optional, leave blank for the official one)',
     'settings.anthropicWarning': 'ℹ️ This tool uses the <code>anthropic-dangerous-direct-browser-access</code> header for direct browser access — no extra proxy needed under normal circumstances. But note: putting a key directly into frontend code/browser storage means anyone with access to this device\'s browser data could in principle retrieve it. Don\'t save it on a shared/public computer, avoid using a high-limit key long-term, and consider creating a separate lower-limit key in the console just for this.',
@@ -3425,6 +3462,7 @@ const I18N = {
     'settings.providerDesc': 'Jeder Anbieter speichert Key / Modell / Endpunkt getrennt — beim Wechseln gehen die Angaben der anderen Anbieter nicht verloren. Alle Keys werden nur im lokalen Speicher (localStorage) dieses Browsers abgelegt — dieses Tool hat kein Backend. Keys nicht auf gemeinsam genutzten/öffentlichen Rechnern speichern.',
     'settings.providerOpenaiCompatible': 'OpenAI-kompatibel',
     'settings.anthropicDesc': 'Erhältlich unter <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Leer lassen, um anzunehmen, dass dieses Tool in der claude.ai-Artifact-Sandbox läuft (die einen eigenen Auth-Proxy hat).',
+    'settings.toggleKeyVisibility': 'Eingegebenen API-Key ein- oder ausblenden',
     'settings.modelLabel': 'Modell',
     'settings.baseUrlOptionalLabel': 'Endpunkt (optional, leer lassen für den offiziellen)',
     'settings.anthropicWarning': 'ℹ️ Dieses Tool nutzt den Header <code>anthropic-dangerous-direct-browser-access</code> für direkten Browserzugriff — normalerweise ohne zusätzlichen Proxy nutzbar. Beachte aber: Einen Key direkt im Frontend-Code/Browser-Speicher abzulegen bedeutet, dass jeder mit Zugriff auf die Browserdaten dieses Geräts ihn theoretisch auslesen kann. Nicht auf gemeinsam genutzten/öffentlichen Rechnern speichern, keine langfristige Nutzung eines Keys mit hohem Limit — am besten in der Konsole einen separaten Key mit niedrigerem Limit dafür anlegen.',
@@ -3563,6 +3601,7 @@ const I18N = {
     'settings.providerDesc': 'Chaque fournisseur conserve sa propre clé / modèle / point d\'accès : changer de fournisseur ne fait pas perdre ce qui a été saisi pour les autres. Toutes les clés sont stockées uniquement dans le stockage local (localStorage) de ce navigateur — cet outil n\'a pas de backend. Ne conservez pas de clé sur un ordinateur partagé/public.',
     'settings.providerOpenaiCompatible': 'Compatible OpenAI',
     'settings.anthropicDesc': 'À obtenir sur <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Laissez vide pour supposer que cet outil s\'exécute dans le bac à sable d\'artefact claude.ai (qui a son propre proxy d\'authentification).',
+    'settings.toggleKeyVisibility': 'Afficher ou masquer la clé API saisie',
     'settings.modelLabel': 'Modèle',
     'settings.baseUrlOptionalLabel': 'Point d\'accès (facultatif, laisser vide pour l\'officiel)',
     'settings.anthropicWarning': 'ℹ️ Cet outil utilise l\'en-tête <code>anthropic-dangerous-direct-browser-access</code> pour un accès direct depuis le navigateur — normalement sans proxy supplémentaire. Attention cependant : placer une clé directement dans le code frontend/le stockage du navigateur signifie que quiconque a accès aux données du navigateur de cet appareil pourrait théoriquement la récupérer. Ne la conservez pas sur un ordinateur partagé/public, évitez d\'utiliser durablement une clé à quota élevé, et créez plutôt une clé séparée à quota réduit dans la console pour cet usage.',
@@ -3701,6 +3740,7 @@ const I18N = {
     'settings.providerDesc': 'Cada proveedor guarda su propia clave / modelo / endpoint por separado: cambiar de proveedor no borra lo que hayas introducido en los demás. Todas las claves se guardan solo en el almacenamiento local (localStorage) de este navegador — esta herramienta no tiene backend. No guardes claves en un ordenador compartido/público.',
     'settings.providerOpenaiCompatible': 'Compatible con OpenAI',
     'settings.anthropicDesc': 'Consíguela en <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Déjalo en blanco para suponer que esta herramienta se ejecuta dentro del sandbox de artefactos de claude.ai (que tiene su propio proxy de autenticación).',
+    'settings.toggleKeyVisibility': 'Mostrar u ocultar la clave API introducida',
     'settings.modelLabel': 'Modelo',
     'settings.baseUrlOptionalLabel': 'Endpoint (opcional, déjalo en blanco para el oficial)',
     'settings.anthropicWarning': 'ℹ️ Esta herramienta usa la cabecera <code>anthropic-dangerous-direct-browser-access</code> para el acceso directo desde el navegador — normalmente sin necesidad de un proxy adicional. Ten en cuenta: poner una clave directamente en el código frontend/almacenamiento del navegador significa que cualquiera con acceso a los datos del navegador de este dispositivo podría, en teoría, obtenerla. No la guardes en un ordenador compartido/público, evita usar a largo plazo una clave con límite alto, y considera crear una clave aparte con un límite más bajo en la consola solo para esto.',
@@ -3839,6 +3879,7 @@ const I18N = {
     'settings.providerDesc': 'Ogni provider salva key / modello / endpoint separatamente: cambiare provider non fa perdere quanto inserito per gli altri. Tutte le key sono salvate solo nell\'archiviazione locale (localStorage) di questo browser — questo strumento non ha un backend. Non salvare le key su un computer condiviso/pubblico.',
     'settings.providerOpenaiCompatible': 'Compatibile OpenAI',
     'settings.anthropicDesc': 'Ottienila su <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Lascia vuoto per assumere che questo strumento sia in esecuzione nella sandbox artifact di claude.ai (che ha un proprio proxy di autenticazione).',
+    'settings.toggleKeyVisibility': 'Mostra o nascondi la chiave API inserita',
     'settings.modelLabel': 'Modello',
     'settings.baseUrlOptionalLabel': 'Endpoint (opzionale, lascia vuoto per quello ufficiale)',
     'settings.anthropicWarning': 'ℹ️ Questo strumento usa l\'header <code>anthropic-dangerous-direct-browser-access</code> per l\'accesso diretto dal browser — normalmente senza bisogno di un proxy aggiuntivo. Attenzione però: inserire una key direttamente nel codice frontend/archiviazione del browser significa che chiunque abbia accesso ai dati del browser di questo dispositivo potrebbe teoricamente recuperarla. Non salvarla su un computer condiviso/pubblico, evita l\'uso prolungato di una key con limite alto, e valuta di crearne una separata con limite più basso nella console solo per questo scopo.',
@@ -3977,6 +4018,7 @@ const I18N = {
     'settings.providerDesc': 'Каждый провайдер хранит свой ключ / модель / адрес отдельно — переключение провайдера не удаляет данные, введённые для других. Все ключи хранятся только в локальном хранилище (localStorage) этого браузера — у инструмента нет backend. Не сохраняйте ключи на общем/публичном компьютере.',
     'settings.providerOpenaiCompatible': 'Совместимый с OpenAI',
     'settings.anthropicDesc': 'Получить можно на <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Оставьте пустым, чтобы предположить, что инструмент работает в песочнице артефактов claude.ai (у неё свой прокси авторизации).',
+    'settings.toggleKeyVisibility': 'Показать или скрыть введённый API-ключ',
     'settings.modelLabel': 'Модель',
     'settings.baseUrlOptionalLabel': 'Адрес (необязательно, оставьте пустым для официального)',
     'settings.anthropicWarning': 'ℹ️ Этот инструмент использует заголовок <code>anthropic-dangerous-direct-browser-access</code> для прямого доступа из браузера — обычно без дополнительного прокси. Но учтите: размещение ключа прямо во фронтенд-коде/хранилище браузера означает, что любой, у кого есть доступ к данным браузера на этом устройстве, теоретически может его получить. Не сохраняйте на общем/публичном компьютере, не используйте долго ключ с высоким лимитом — создайте в консоли отдельный ключ с меньшим лимитом специально для этого.',
@@ -4115,6 +4157,7 @@ const I18N = {
     'settings.providerDesc': '各プロバイダーの key・モデル・エンドポイントは個別に保存されるため、プロバイダーを切り替えても他のプロバイダーの入力内容は失われません。すべての key はこの端末のブラウザのローカルストレージ（localStorage）にのみ保存され、サーバーには送信されません（本ツールにはバックエンドがありません）。共有・公共のパソコンには保存しないでください。',
     'settings.providerOpenaiCompatible': 'OpenAI 互換',
     'settings.anthropicDesc': '<a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> で取得できます。空欄の場合、本ツールが claude.ai の artifact サンドボックス内（独自の認証プロキシを持つ）で動作していると仮定します。',
+    'settings.toggleKeyVisibility': '入力した API キーの表示・非表示を切り替え',
     'settings.modelLabel': 'モデル',
     'settings.baseUrlOptionalLabel': 'エンドポイント（任意、空欄なら公式エンドポイント）',
     'settings.anthropicWarning': 'ℹ️ 本ツールは <code>anthropic-dangerous-direct-browser-access</code> ヘッダーによりブラウザから直接アクセスします。通常は追加のプロキシは不要です。ただし、key をフロントエンドコード／ブラウザのストレージに直接置くと、この端末のブラウザデータにアクセスできる人は理論上 key を取得できることに注意してください。共有・公共のパソコンには保存せず、上限額の高い key を長期間使うことも避け、この用途専用に上限の低い key をコンソールで別途作成することをおすすめします。',
@@ -7089,6 +7132,7 @@ ${transLabel}〈这里填这句话完整、通顺、自然的整句翻译〉
 - 每个词条格式：*原词* — 释义，然后**只**按这个词自己的词性附加下面对应的一条信息。
   - 每个词条只属于一个词性。不属于的那些类别**整条略去、一个字都不要写**，禁止出现「动词：不适用」「无比较级」「N/A」「—」这类占位说明，也不要生造不存在的变化形式。
   - **「原词」写的是这个词的词典引用形式（词典原形），不是它在原句里出现的屈折/变位形式**，两者不一致时以原形为准：动词写不定式（分离动词要把分离前缀合并回去——原句写的是被拆开的变位形式 *nahmen … aus*，词条仍要写成原形 *ausnehmen*，不要写变位形式，也不要漏掉前缀）；名词写主格单数；形容词写原级（比较级/最高级要还原）。原句里那个具体屈折形式如果本身值得一提（不规则变位、罕见的格等），放进释义里说明，不要让词条本身停在屈折形式上。
+  - **如果这个词是一个固定的「虚位主语 es + 动词 + 介词」习语搭配的一部分**（如德语 *es kommt jemandem auf etwas an*、*es geht um etwas*、*es handelt sich um etwas* 这类），**直接把整个习语搭配写作词条，不要把其中的动词单独拆出来再重新拼成不定式**——实测弱模型在重新拼写的过程中会臆造出并不存在的词形（把 *ankommen* 拼成 *anrekommen*）。整条习语本身就是一个词典里查得到的固定搭配，写全它比硬拆一个词更准确、也更不容易拼错。
   - **引用形式按被分析语言自己的词典惯例来定，不要照搬其他语言的惯例。** 拉丁语词典用第一人称单数现在时作动词词头（*confero*、*succedo*），不是不定式；拉丁语名词用主格单数（*phalanx*、*carrus*），不是词干。
   - **词条必须是这门语言里真实存在的完整单词**，不能是截断的词干或拼凑出来的形式（*phalange* 的词条是 *phalanx*，不是 *phalang*）；并且词条必须和你在同一条里给出的变化形式是**同一个词**——括号里写了 *confero, contuli, collatum*，词条就不能写成 *infero*。
   - 名词：给出该语言的语法性，并且**只写这个词实际的那一个定冠词**。德语的定冠词是 der、die、das 三者之一，必须三选一：Erdbeben 是中性，就只写 das，写成「der/das」或列出多个是错的。（法语、俄语等按该语言的阳性/阴性/中性体例；中文、英文等没有语法性的语言，这一项整条略去。）此外给出复数形式。
@@ -7727,9 +7771,28 @@ function wireModelSuggestionInputs() {
   });
 }
 
+// The key inputs are plain type="password" fields with no custom markup of
+// our own for a reveal icon -- so whatever eye icon a reader has seen there
+// is the browser's own password-manager UI, shown or not per its own
+// heuristics (form context, autocomplete, whether it looks like a login
+// field to that browser), not something this app controls or can make
+// consistent. This button is the app's own, so it always works the same way.
+function wireKeyVisibilityToggles() {
+  document.querySelectorAll('.key-toggle-btn').forEach(btn => {
+    const input = document.getElementById(btn.dataset.keyTarget);
+    if (!input) return;
+    btn.addEventListener('click', () => {
+      const revealed = input.type === 'text';
+      input.type = revealed ? 'password' : 'text';
+      btn.textContent = revealed ? '👁' : '🙈';
+    });
+  });
+}
+
 function wireSettingsModal() {
   document.getElementById('btn-open-settings').addEventListener('click', openSettings);
   wireModelSuggestionInputs();
+  wireKeyVisibilityToggles();
   document.getElementById('btn-close-settings').addEventListener('click', closeSettings);
   document.getElementById('settings-overlay').addEventListener('click', (e) => {
     if (e.target.id === 'settings-overlay') closeSettings();

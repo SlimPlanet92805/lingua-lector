@@ -143,6 +143,26 @@ module.exports = ({ describe, it, assert }) => {
         'prompt must require the headword and its listed forms to be the same word');
     });
 
+    // Found by running real German sentences (Heyking's diaries) through
+    // gemini-3.5-flash-lite: told to give the dictionary infinitive for the
+    // verb inside "es kommt jemandem auf etwas an", the model invented a
+    // word that does not exist in German (*anrekommen*) instead of the real
+    // one (*ankommen*). Isolating a verb out of an impersonal es-idiom to
+    // rebuild its infinitive is exactly the kind of reconstruction that
+    // (d)'s general dictionary-form rule already asks for, and it is exactly
+    // where a weak model's spelling breaks down -- so idioms of this shape
+    // get told to cite the whole fixed phrase instead of isolating the verb.
+    it('tells the model to cite es-idioms whole instead of isolating the verb', () => {
+      const { get } = loadApp();
+      const prompt = get('buildSystemPrompt')();
+      assert.ok(/es kommt jemandem auf etwas an/.test(prompt),
+        'prompt should name the observed es-idiom pattern');
+      assert.ok(/anrekommen/.test(prompt),
+        'prompt should carry the observed fabricated non-word as a counterexample');
+      assert.ok(/不要把其中的动词单独拆出来/.test(prompt),
+        'prompt must tell the model not to isolate the verb out of the idiom');
+    });
+
     it('defines a subordinate clause by its finite verb', () => {
       const { get } = loadApp();
       const prompt = get('buildSystemPrompt')();

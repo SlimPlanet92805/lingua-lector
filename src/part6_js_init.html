@@ -352,9 +352,28 @@ function wireModelSuggestionInputs() {
   });
 }
 
+// The key inputs are plain type="password" fields with no custom markup of
+// our own for a reveal icon -- so whatever eye icon a reader has seen there
+// is the browser's own password-manager UI, shown or not per its own
+// heuristics (form context, autocomplete, whether it looks like a login
+// field to that browser), not something this app controls or can make
+// consistent. This button is the app's own, so it always works the same way.
+function wireKeyVisibilityToggles() {
+  document.querySelectorAll('.key-toggle-btn').forEach(btn => {
+    const input = document.getElementById(btn.dataset.keyTarget);
+    if (!input) return;
+    btn.addEventListener('click', () => {
+      const revealed = input.type === 'text';
+      input.type = revealed ? 'password' : 'text';
+      btn.textContent = revealed ? '👁' : '🙈';
+    });
+  });
+}
+
 function wireSettingsModal() {
   document.getElementById('btn-open-settings').addEventListener('click', openSettings);
   wireModelSuggestionInputs();
+  wireKeyVisibilityToggles();
   document.getElementById('btn-close-settings').addEventListener('click', closeSettings);
   document.getElementById('settings-overlay').addEventListener('click', (e) => {
     if (e.target.id === 'settings-overlay') closeSettings();

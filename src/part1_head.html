@@ -1006,6 +1006,25 @@
   .field-group input:focus, .field-group select:focus, .field-group textarea:focus {
     border-color: var(--accent-soft);
   }
+  /* API key fields are plain type="password" inputs, so whether a reveal
+     icon shows at all -- and whether it's inside or outside the field -- is
+     entirely up to the browser's own password-manager heuristics, which is
+     why it can appear and disappear across page loads. This button is the
+     app's own, so it's always there. */
+  .key-input-row { display: flex; gap: 6px; align-items: center; }
+  .key-input-row input { flex: 1; min-width: 0; }
+  .key-toggle-btn {
+    flex-shrink: 0;
+    border: 1px solid var(--rule);
+    background: none;
+    color: var(--ink-soft);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 9px 11px;
+    border-radius: 8px;
+  }
+  .key-toggle-btn:hover { background: var(--rule); color: var(--accent); }
   .field-row { display: flex; gap: 12px; }
   .field-row > * { flex: 1; }
 

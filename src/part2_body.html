@@ -111,7 +111,12 @@
             可在 <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> 申请。
             留空时会自动尝试假设本工具运行在 claude.ai 的 artifact 沙盒里（沙盒有自己的鉴权代理）。
           </div>
-          <input type="password" id="anthropic-key-input" placeholder="sk-ant-...">
+          <div class="key-input-row">
+            <input type="password" id="anthropic-key-input" placeholder="sk-ant-...">
+            <button type="button" class="key-toggle-btn" data-key-target="anthropic-key-input"
+                    data-i18n-label="settings.toggleKeyVisibility" data-i18n-title="settings.toggleKeyVisibility"
+                    aria-label="显示或隐藏已填写的 API key" title="显示或隐藏已填写的 API key">👁</button>
+          </div>
           <label style="margin-top:14px;" data-i18n="settings.modelLabel">模型</label>
           <input type="text" id="anthropic-model-input" list="anthropic-model-suggestions" placeholder="claude-sonnet-5">
           <datalist id="anthropic-model-suggestions">
@@ -136,7 +141,12 @@
             适用于 OpenAI 官方，以及任何暴露相同 <code>/chat/completions</code> 接口的兼容服务
             （DeepSeek、Groq、本地 Ollama 等）——把下面的接口地址换成对应服务的地址即可。
           </div>
-          <input type="password" id="openai-key-input" placeholder="sk-...">
+          <div class="key-input-row">
+            <input type="password" id="openai-key-input" placeholder="sk-...">
+            <button type="button" class="key-toggle-btn" data-key-target="openai-key-input"
+                    data-i18n-label="settings.toggleKeyVisibility" data-i18n-title="settings.toggleKeyVisibility"
+                    aria-label="显示或隐藏已填写的 API key" title="显示或隐藏已填写的 API key">👁</button>
+          </div>
           <label style="margin-top:14px;" data-i18n="settings.baseUrlLabel">接口地址（Base URL）</label>
           <input type="text" id="openai-baseurl-input" placeholder="https://api.openai.com/v1">
           <div class="field-desc hidden" data-proxy-hint="openai"></div>
@@ -159,7 +169,12 @@
           <div class="field-desc" data-i18n="settings.geminiDesc">
             可在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 申请。
           </div>
-          <input type="password" id="gemini-key-input" placeholder="AIza...">
+          <div class="key-input-row">
+            <input type="password" id="gemini-key-input" placeholder="AIza...">
+            <button type="button" class="key-toggle-btn" data-key-target="gemini-key-input"
+                    data-i18n-label="settings.toggleKeyVisibility" data-i18n-title="settings.toggleKeyVisibility"
+                    aria-label="显示或隐藏已填写的 API key" title="显示或隐藏已填写的 API key">👁</button>
+          </div>
           <label style="margin-top:14px;" data-i18n="settings.baseUrlLabel">接口地址（Base URL）</label>
           <input type="text" id="gemini-baseurl-input" placeholder="https://generativelanguage.googleapis.com/v1beta">
           <div class="field-desc hidden" data-proxy-hint="gemini"></div>
