@@ -901,10 +901,22 @@ function renderTocList() {
 // ============================================================
 // Document library (settings > 文档 tab)
 // ============================================================
+
+// Short enough that it doesn't get in the way of the next thing the reader
+// does (import, then immediately pick the new book) -- matches the page-turn
+// and panel-drag durations elsewhere.
+const DOC_LIST_ANIM_MS = 180;
+
 function renderDocLibraryList() {
   const list = document.getElementById('doc-library-list');
   if (!list) return;
-  list.innerHTML = '';
+  // Reuse existing <li> nodes by id instead of nuking and rebuilding: an
+  // import or delete is a single row appearing or disappearing, and a full
+  // innerHTML replace gives every row no identity to animate from, so it can
+  // only ever be a hard cut.
+  const existingLis = new Map();
+  list.querySelectorAll('.doc-library-item').forEach(li => existingLis.set(li.dataset.docId, li));
+
   const index = loadDocIndex();
   // The example is a build constant rather than a stored document, so its row
   // is synthesised here -- unless the reader deleted it, in which case it is
@@ -915,10 +927,22 @@ function renderDocLibraryList() {
   const entries = builtinEntry
     .concat(index.filter(d => d.id !== BOOK_DOC_ID))
     .sort((a, b) => (a.builtin ? -1 : b.builtin ? 1 : (b.savedAt || 0) - (a.savedAt || 0)));
+  const keepIds = new Set(entries.map(e => e.id));
+
+  // Rows no longer in the library get a short collapse instead of vanishing
+  // out from under the reader's cursor mid-click.
+  existingLis.forEach((li, id) => {
+    if (keepIds.has(id)) return;
+    if (prefersReducedMotion()) { li.remove(); return; }
+    li.classList.add('doc-library-item-exit');
+    setTimeout(() => li.remove(), DOC_LIST_ANIM_MS + 30);
+  });
 
   entries.forEach(entry => {
-    const li = document.createElement('li');
+    const isNew = !existingLis.has(entry.id);
+    const li = isNew ? document.createElement('li') : existingLis.get(entry.id);
     li.className = 'doc-library-item' + (entry.id === currentDocId ? ' current' : '');
+    li.dataset.docId = entry.id;
     const meta = entry.builtin
       ? t('settings.libraryBuiltin')
       : t('settings.libraryChapterCount', { n: entry.chapterCount || 0 });
@@ -953,10 +977,16 @@ function renderDocLibraryList() {
       await deleteDocumentFromLibrary(entry.id);
       syncSettingsFormFromState();
     });
+    // appendChild moves an already-mounted node rather than duplicating it,
+    // so this both places new rows and re-sorts survivors into entries' order.
     list.appendChild(li);
     // The built-in book is part of the build, not stored text -- it costs
     // nothing until it has been edited, so don't put a size on its row.
     if (!entry.builtin) annotateDocSize(li, entry.id);
+    if (isNew && !prefersReducedMotion()) {
+      li.classList.add('doc-library-item-enter');
+      setTimeout(() => li.classList.remove('doc-library-item-enter'), DOC_LIST_ANIM_MS + 30);
+    }
   });
 
   const restoreBtn = document.getElementById('btn-restore-example');
@@ -1278,8 +1308,10 @@ function renderResult(result, sentenceText) {
   const body = document.getElementById('panel-body');
   if (result.error) {
     body.innerHTML = `
-      <div class="error-box">${escapeHtml(result.error)}</div>
-      <button class="retry-btn" id="retry-btn">${t('panel.retry')}</button>
+      <div class="panel-result-in">
+        <div class="error-box">${escapeHtml(result.error)}</div>
+        <button class="retry-btn" id="retry-btn">${t('panel.retry')}</button>
+      </div>
     `;
     const retryBtn = document.getElementById('retry-btn');
     if (retryBtn) retryBtn.addEventListener('click', reanalyzeActiveSentence);
@@ -1291,6 +1323,7 @@ function renderResult(result, sentenceText) {
   const followUps = (result.history || []).slice(2);
 
   body.innerHTML = `
+    <div class="panel-result-in">
     <div class="section-tabs" role="tablist" aria-label="${escapeHtml(t('panel.title'))}">
       <button class="tab-btn active" data-tab="grammar" role="tab"
               id="tab-grammar" aria-controls="tabpanel-grammar"
@@ -1311,6 +1344,7 @@ function renderResult(result, sentenceText) {
         <textarea id="chat-input" rows="1" placeholder="${escapeHtml(t('chat.placeholder'))}"></textarea>
         <button id="chat-send-btn" class="btn primary">${t('chat.send')}</button>
       </div>
+    </div>
     </div>
   `;
   const tabs = [...body.querySelectorAll('.tab-btn')];

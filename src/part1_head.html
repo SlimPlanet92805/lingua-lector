@@ -371,9 +371,26 @@
     gap: 10px;
     padding: 10px 14px;
     border-bottom: 1px solid var(--rule);
+    max-height: 64px;
+    overflow: hidden;
+    transition: max-height .18s ease, opacity .18s ease, padding .18s ease, border-color .18s ease;
   }
   .doc-library-item:last-child { border-bottom: none; }
   .doc-library-item.current { background: var(--highlight); }
+  /* Deleting a row: collapse it instead of cutting it, so the list doesn't
+     jump under the reader's cursor mid-click. */
+  .doc-library-item.doc-library-item-exit {
+    max-height: 0;
+    opacity: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-color: transparent;
+  }
+  @keyframes doc-library-item-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .doc-library-item.doc-library-item-enter { animation: doc-library-item-in .18s ease both; }
   .doc-library-item-main { flex: 1; min-width: 0; cursor: pointer; }
   .doc-library-item-title { font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .doc-library-item-meta { font-size: 11px; color: var(--ink-soft); }
@@ -692,6 +709,14 @@
      one, and must not be flex:1 either -- that would cap it at the panel's
      height instead of letting it grow and push the shared scrollbar. */
   .panel-body { flex: none; overflow-y: visible; padding: 0 22px 32px; }
+  /* The spinner-to-result swap replaces panel-body's children outright, so
+     this plays automatically every time -- no JS toggling needed, unlike an
+     element that persists across renders. */
+  @keyframes panel-result-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: none; }
+  }
+  .panel-result-in { animation: panel-result-in .18s ease both; }
   .panel-empty {
     padding: 60px 22px;
     text-align: center;
@@ -1288,6 +1313,18 @@
      screen of text sliding sideways -- but blanket-disabling every transition
      is the safe reading of the preference. Paging still works, it just cuts
      rather than slides. */
+  /* Applied to <html> only for the ~180ms right after the reader saves a
+     theme change (see applyTheme() in part6) -- everything on screen reads
+     its colors from the CSS custom properties this switch changes, so a
+     blanket override is the only way to cross-fade the whole page instead of
+     just the handful of elements that happen to declare their own color
+     transition. Removed again right after, so it never lingers to affect
+     unrelated transitions (panel drag, page turns, hover states). */
+  html.theme-transition, html.theme-transition * {
+    transition: background-color .18s ease, color .18s ease,
+      border-color .18s ease, fill .18s ease, box-shadow .18s ease !important;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       transition-duration: 0.01ms !important;

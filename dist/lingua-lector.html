@@ -371,9 +371,26 @@
     gap: 10px;
     padding: 10px 14px;
     border-bottom: 1px solid var(--rule);
+    max-height: 64px;
+    overflow: hidden;
+    transition: max-height .18s ease, opacity .18s ease, padding .18s ease, border-color .18s ease;
   }
   .doc-library-item:last-child { border-bottom: none; }
   .doc-library-item.current { background: var(--highlight); }
+  /* Deleting a row: collapse it instead of cutting it, so the list doesn't
+     jump under the reader's cursor mid-click. */
+  .doc-library-item.doc-library-item-exit {
+    max-height: 0;
+    opacity: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-color: transparent;
+  }
+  @keyframes doc-library-item-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .doc-library-item.doc-library-item-enter { animation: doc-library-item-in .18s ease both; }
   .doc-library-item-main { flex: 1; min-width: 0; cursor: pointer; }
   .doc-library-item-title { font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .doc-library-item-meta { font-size: 11px; color: var(--ink-soft); }
@@ -692,6 +709,14 @@
      one, and must not be flex:1 either -- that would cap it at the panel's
      height instead of letting it grow and push the shared scrollbar. */
   .panel-body { flex: none; overflow-y: visible; padding: 0 22px 32px; }
+  /* The spinner-to-result swap replaces panel-body's children outright, so
+     this plays automatically every time -- no JS toggling needed, unlike an
+     element that persists across renders. */
+  @keyframes panel-result-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: none; }
+  }
+  .panel-result-in { animation: panel-result-in .18s ease both; }
   .panel-empty {
     padding: 60px 22px;
     text-align: center;
@@ -1288,6 +1313,18 @@
      screen of text sliding sideways -- but blanket-disabling every transition
      is the safe reading of the preference. Paging still works, it just cuts
      rather than slides. */
+  /* Applied to <html> only for the ~180ms right after the reader saves a
+     theme change (see applyTheme() in part6) -- everything on screen reads
+     its colors from the CSS custom properties this switch changes, so a
+     blanket override is the only way to cross-fade the whole page instead of
+     just the handful of elements that happen to declare their own color
+     transition. Removed again right after, so it never lingers to affect
+     unrelated transitions (panel drag, page turns, hover states). */
+  html.theme-transition, html.theme-transition * {
+    transition: background-color .18s ease, color .18s ease,
+      border-color .18s ease, fill .18s ease, box-shadow .18s ease !important;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       transition-duration: 0.01ms !important;
@@ -6317,10 +6354,22 @@ function renderTocList() {
 // ============================================================
 // Document library (settings > 文档 tab)
 // ============================================================
+
+// Short enough that it doesn't get in the way of the next thing the reader
+// does (import, then immediately pick the new book) -- matches the page-turn
+// and panel-drag durations elsewhere.
+const DOC_LIST_ANIM_MS = 180;
+
 function renderDocLibraryList() {
   const list = document.getElementById('doc-library-list');
   if (!list) return;
-  list.innerHTML = '';
+  // Reuse existing <li> nodes by id instead of nuking and rebuilding: an
+  // import or delete is a single row appearing or disappearing, and a full
+  // innerHTML replace gives every row no identity to animate from, so it can
+  // only ever be a hard cut.
+  const existingLis = new Map();
+  list.querySelectorAll('.doc-library-item').forEach(li => existingLis.set(li.dataset.docId, li));
+
   const index = loadDocIndex();
   // The example is a build constant rather than a stored document, so its row
   // is synthesised here -- unless the reader deleted it, in which case it is
@@ -6331,10 +6380,22 @@ function renderDocLibraryList() {
   const entries = builtinEntry
     .concat(index.filter(d => d.id !== BOOK_DOC_ID))
     .sort((a, b) => (a.builtin ? -1 : b.builtin ? 1 : (b.savedAt || 0) - (a.savedAt || 0)));
+  const keepIds = new Set(entries.map(e => e.id));
+
+  // Rows no longer in the library get a short collapse instead of vanishing
+  // out from under the reader's cursor mid-click.
+  existingLis.forEach((li, id) => {
+    if (keepIds.has(id)) return;
+    if (prefersReducedMotion()) { li.remove(); return; }
+    li.classList.add('doc-library-item-exit');
+    setTimeout(() => li.remove(), DOC_LIST_ANIM_MS + 30);
+  });
 
   entries.forEach(entry => {
-    const li = document.createElement('li');
+    const isNew = !existingLis.has(entry.id);
+    const li = isNew ? document.createElement('li') : existingLis.get(entry.id);
     li.className = 'doc-library-item' + (entry.id === currentDocId ? ' current' : '');
+    li.dataset.docId = entry.id;
     const meta = entry.builtin
       ? t('settings.libraryBuiltin')
       : t('settings.libraryChapterCount', { n: entry.chapterCount || 0 });
@@ -6369,10 +6430,16 @@ function renderDocLibraryList() {
       await deleteDocumentFromLibrary(entry.id);
       syncSettingsFormFromState();
     });
+    // appendChild moves an already-mounted node rather than duplicating it,
+    // so this both places new rows and re-sorts survivors into entries' order.
     list.appendChild(li);
     // The built-in book is part of the build, not stored text -- it costs
     // nothing until it has been edited, so don't put a size on its row.
     if (!entry.builtin) annotateDocSize(li, entry.id);
+    if (isNew && !prefersReducedMotion()) {
+      li.classList.add('doc-library-item-enter');
+      setTimeout(() => li.classList.remove('doc-library-item-enter'), DOC_LIST_ANIM_MS + 30);
+    }
   });
 
   const restoreBtn = document.getElementById('btn-restore-example');
@@ -6694,8 +6761,10 @@ function renderResult(result, sentenceText) {
   const body = document.getElementById('panel-body');
   if (result.error) {
     body.innerHTML = `
-      <div class="error-box">${escapeHtml(result.error)}</div>
-      <button class="retry-btn" id="retry-btn">${t('panel.retry')}</button>
+      <div class="panel-result-in">
+        <div class="error-box">${escapeHtml(result.error)}</div>
+        <button class="retry-btn" id="retry-btn">${t('panel.retry')}</button>
+      </div>
     `;
     const retryBtn = document.getElementById('retry-btn');
     if (retryBtn) retryBtn.addEventListener('click', reanalyzeActiveSentence);
@@ -6707,6 +6776,7 @@ function renderResult(result, sentenceText) {
   const followUps = (result.history || []).slice(2);
 
   body.innerHTML = `
+    <div class="panel-result-in">
     <div class="section-tabs" role="tablist" aria-label="${escapeHtml(t('panel.title'))}">
       <button class="tab-btn active" data-tab="grammar" role="tab"
               id="tab-grammar" aria-controls="tabpanel-grammar"
@@ -6727,6 +6797,7 @@ function renderResult(result, sentenceText) {
         <textarea id="chat-input" rows="1" placeholder="${escapeHtml(t('chat.placeholder'))}"></textarea>
         <button id="chat-send-btn" class="btn primary">${t('chat.send')}</button>
       </div>
+    </div>
     </div>
   `;
   const tabs = [...body.querySelectorAll('.tab-btn')];
@@ -7559,11 +7630,22 @@ const FONT_FAMILY_VALUES = {
   mono: '"SF Mono", Consolas, "Courier New", monospace',
 };
 
-function applyTheme() {
+// Only the reader's own choice (the settings-save path) should cross-fade --
+// the very first call, at startup, must land on the right theme in the first
+// frame, not fade into it from whatever the stylesheet's default is.
+const THEME_TRANSITION_MS = 180;
+let themeTransitionTimer = null;
+function applyTheme(animate) {
+  const root = document.documentElement;
+  if (animate && !prefersReducedMotion()) {
+    root.classList.add('theme-transition');
+    clearTimeout(themeTransitionTimer);
+    themeTransitionTimer = setTimeout(() => root.classList.remove('theme-transition'), THEME_TRANSITION_MS + 30);
+  }
   if (settings.theme) {
-    document.documentElement.dataset.theme = settings.theme;
+    root.dataset.theme = settings.theme;
   } else {
-    delete document.documentElement.dataset.theme;
+    delete root.dataset.theme;
   }
 }
 
@@ -7755,7 +7837,7 @@ function wireSettingsModal() {
     settings.fontSize = Number.isFinite(fontSize) ? fontSize : 19;
 
     saveSettingsToLocalStorage();
-    applyTheme();
+    applyTheme(true);
     applyFont();
 
     const sentenceLangChanged = settings.sentenceLang !== prevSentenceLang;

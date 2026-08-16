@@ -255,11 +255,22 @@ const FONT_FAMILY_VALUES = {
   mono: '"SF Mono", Consolas, "Courier New", monospace',
 };
 
-function applyTheme() {
+// Only the reader's own choice (the settings-save path) should cross-fade --
+// the very first call, at startup, must land on the right theme in the first
+// frame, not fade into it from whatever the stylesheet's default is.
+const THEME_TRANSITION_MS = 180;
+let themeTransitionTimer = null;
+function applyTheme(animate) {
+  const root = document.documentElement;
+  if (animate && !prefersReducedMotion()) {
+    root.classList.add('theme-transition');
+    clearTimeout(themeTransitionTimer);
+    themeTransitionTimer = setTimeout(() => root.classList.remove('theme-transition'), THEME_TRANSITION_MS + 30);
+  }
   if (settings.theme) {
-    document.documentElement.dataset.theme = settings.theme;
+    root.dataset.theme = settings.theme;
   } else {
-    delete document.documentElement.dataset.theme;
+    delete root.dataset.theme;
   }
 }
 
@@ -451,7 +462,7 @@ function wireSettingsModal() {
     settings.fontSize = Number.isFinite(fontSize) ? fontSize : 19;
 
     saveSettingsToLocalStorage();
-    applyTheme();
+    applyTheme(true);
     applyFont();
 
     const sentenceLangChanged = settings.sentenceLang !== prevSentenceLang;
