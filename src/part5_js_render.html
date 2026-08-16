@@ -220,7 +220,12 @@ function sanitizeFilenamePart(s) {
 }
 
 function triggerCsvDownload(filename, csvText) {
-  const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
+  // Excel opens a double-clicked .csv by sniffing the system codepage, not
+  // UTF-8, unless a BOM tells it otherwise -- without this every umlaut,
+  // em dash and CJK character in the file (i.e. most of what's in it) comes
+  // out as mojibake. The BOM goes on the Blob, not into csvText itself, so
+  // buildVocabCsv()'s output stays the plain, testable string it is now.
+  const blob = new Blob(['﻿', csvText], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;

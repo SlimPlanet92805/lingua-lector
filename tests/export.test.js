@@ -91,6 +91,29 @@ module.exports = ({ describe, it, assert }) => {
     });
   });
 
+  describe('CSV download', () => {
+    // Regression guard for a bug reported from a real export: Excel opens a
+    // double-clicked .csv by sniffing the system codepage, not UTF-8, unless
+    // a BOM says otherwise. Without it every umlaut, em dash and CJK
+    // character in the file -- i.e. most of what a vocab CSV actually
+    // contains -- came out as mojibake. Can't drive this through an actual
+    // Blob (the vm environment has none), so this pins it at the source
+    // level: the Blob parts array must carry the BOM ahead of csvText, and
+    // buildVocabCsv()'s own return value must stay BOM-free (it's a pure
+    // string used elsewhere in tests without expecting one).
+    it('prefixes the downloaded blob with a UTF-8 BOM', () => {
+      const { html } = loadApp();
+      assert.ok(/Blob\(\['﻿',\s*csvText\]/.test(html),
+        'triggerCsvDownload must put the BOM ahead of csvText in the Blob parts');
+    });
+
+    it('buildVocabCsv itself stays BOM-free', () => {
+      const { get } = loadApp();
+      const csv = get('buildVocabCsv')([['Erdbeben', '地震', 'Ein Satz.', 'Kap. 1']]);
+      assert.equal(csv.charCodeAt(0), 'W'.charCodeAt(0), 'starts with the header, no leading BOM');
+    });
+  });
+
   describe('collectVocabRows', () => {
     it('reads cached entries for a saved (non-open) document, skipping errors', async () => {
       const { get, app } = loadApp();
