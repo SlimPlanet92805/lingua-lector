@@ -156,7 +156,7 @@ async function extractPdfLines(page) {
   const bottomBand = pageHeight * 0.09;
   const inEdgeBand = (l) => l.y > topBand || l.y < bottomBand;
   const kept = lines.filter(l => {
-    const looksLikeFolio = l.text.length <= 12 && !/[a-zà-öø-ÿ]/.test(l.text);
+    const looksLikeFolio = l.text.length <= 12 && !/\p{Ll}/u.test(l.text);
     return !(inEdgeBand(l) && looksLikeFolio);
   });
   // Everything sitting in the running-header / folio bands, whether or not the
@@ -906,7 +906,7 @@ function looksLikeHeadingLine(p) {
   // chapter headings. Eight of them did, in Briefe die ihn nicht erreichten.
   const core = p.replace(/[\s»«"'“”’–—]+$/, '');
   if (/[.!?…,;:]$/.test(core)) return false;
-  if (!/^[A-ZÀ-ÖØ-Þ0-9"'«»]/.test(p)) return false;
+  if (!/^[\p{Lu}0-9"'«»]/u.test(p)) return false;
   if (p.split(/\s+/).length > 10) return false; // title-like: ~10 words at most
   if (INDEX_LINE_RE.test(p)) return false;
   return true;

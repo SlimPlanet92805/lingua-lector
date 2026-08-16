@@ -124,6 +124,23 @@ module.exports = ({ describe, it, assert }) => {
         'prompt should carry a worked example of reassembling a separable verb');
     });
 
+    // Found by running the prompt over real Turkish (Halid Ziya Uşaklıgil,
+    // Aşk-ı Memnu): told to skip the whole gender item for a language with
+    // no grammatical gender, the model instead invented genders Turkish
+    // doesn't have ("kız kardeş -- feminine noun") or, worse, wrote an
+    // explanatory sentence about *not* having gender -- which is still an
+    // answer to "what gender is this", just phrased as a non-answer, so the
+    // instruction to omit the item outright was not actually being followed.
+    it('tells the model that explaining away a skipped gender item still counts as answering it', () => {
+      const { get } = loadApp();
+      const prompt = get('buildSystemPrompt')();
+      assert.ok(/土耳其语/.test(prompt), 'prompt should name Turkish alongside Chinese/English as genderless');
+      assert.ok(/无性\/不分性/.test(prompt),
+        'prompt must rule out writing an explanatory "no gender" placeholder');
+      assert.ok(/non-gendered/.test(prompt),
+        'prompt should carry the observed fabricated-explanation counterexample');
+    });
+
     // Found by running the prompt over real Latin (Caesar, De Bello Gallico):
     // "動詞寫不定式" is the German/English dictionary convention, and Latin
     // dictionaries head verbs with the 1sg present instead. Told to produce an

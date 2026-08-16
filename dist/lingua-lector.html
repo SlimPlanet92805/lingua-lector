@@ -2711,13 +2711,22 @@ function scanSentenceRanges(chars, ABBREV) {
       else while (chars[i] === '.') i++;
       let j = i;
       while (j < chars.length && chars[j] === ' ') j++;
-      if (/[A-ZÀ-ÖØ-Þ]/.test(chars[j] || '')) closeToken();
+      if (/\p{Lu}/u.test(chars[j] || '')) closeToken();
       continue;
     }
 
     if (c === '.' || c === '!' || c === '?') {
       const trimmed = cur().replace(/[»«"“”‹›'’]+$/, '');
-      const wordMatch = trimmed.match(/([A-Za-zÀ-ÖØ-öø-ÿ]+)\.?$/);
+      // \p{L} (Unicode "any letter"), not a hand-picked Latin-1 range: the old
+      // [A-Za-zÀ-ÖØ-öø-ÿ] range stops at Latin-1, so it doesn't cover the
+      // Latin Extended-A letters Czech/Polish/Turkish spell ordinary words
+      // with (š, č, ř, ž, ą, ę, ł, ş, ğ, ...). When one of those sits right
+      // before the period, this match can only capture the plain-Latin-1
+      // *suffix* after it -- for "horší." that's just "í", a length-1
+      // "word" that the initials check below (line length === 1) then
+      // treats as "T." or "z.", silently merging the sentence into the
+      // next one. Found by running real Czech prose through the splitter.
+      const wordMatch = trimmed.match(/(\p{L}+)\.?$/u);
       let isAbbrev = false;
 
       // numeric ordinal like "15." or "5." (dates, list numbers) -> not an end
@@ -2743,7 +2752,7 @@ function scanSentenceRanges(chars, ABBREV) {
         while (j < chars.length && chars[j] === ' ') j++;
       }
       const nextChar = chars[j] || '';
-      const nextIsLower = /[a-zà-öø-ÿ]/.test(nextChar);
+      const nextIsLower = /\p{Ll}/u.test(nextChar);
       const nextContinuesClause = /[,;:]/.test(nextChar); // clause carries on
 
       if ((c === '.' && isAbbrev) || nextIsLower || nextContinuesClause) {
@@ -2769,7 +2778,7 @@ function scanSentenceRanges(chars, ABBREV) {
   const merged = [];
   for (const r of ranges) {
     const text = chars.slice(r.start, r.end).join('').trim();
-    const isTinyFragment = text.length <= 2 && !/[A-Za-zÀ-ÖØ-öø-ÿ0-9]/.test(text);
+    const isTinyFragment = text.length <= 2 && !/[\p{L}\p{N}]/u.test(text);
     if (isTinyFragment && merged.length) merged[merged.length - 1].end = r.end;
     else merged.push({ start: r.start, end: r.end });
   }
@@ -4443,7 +4452,7 @@ async function extractPdfLines(page) {
   const bottomBand = pageHeight * 0.09;
   const inEdgeBand = (l) => l.y > topBand || l.y < bottomBand;
   const kept = lines.filter(l => {
-    const looksLikeFolio = l.text.length <= 12 && !/[a-zà-öø-ÿ]/.test(l.text);
+    const looksLikeFolio = l.text.length <= 12 && !/\p{Ll}/u.test(l.text);
     return !(inEdgeBand(l) && looksLikeFolio);
   });
   // Everything sitting in the running-header / folio bands, whether or not the
@@ -5193,7 +5202,7 @@ function looksLikeHeadingLine(p) {
   // chapter headings. Eight of them did, in Briefe die ihn nicht erreichten.
   const core = p.replace(/[\s»«"'“”’–—]+$/, '');
   if (/[.!?…,;:]$/.test(core)) return false;
-  if (!/^[A-ZÀ-ÖØ-Þ0-9"'«»]/.test(p)) return false;
+  if (!/^[\p{Lu}0-9"'«»]/u.test(p)) return false;
   if (p.split(/\s+/).length > 10) return false; // title-like: ~10 words at most
   if (INDEX_LINE_RE.test(p)) return false;
   return true;
@@ -7135,7 +7144,7 @@ ${transLabel}〈这里填这句话完整、通顺、自然的整句翻译〉
   - **如果这个词是一个固定的「虚位主语 es + 动词 + 介词」习语搭配的一部分**（如德语 *es kommt jemandem auf etwas an*、*es geht um etwas*、*es handelt sich um etwas* 这类），**直接把整个习语搭配写作词条，不要把其中的动词单独拆出来再重新拼成不定式**——实测弱模型在重新拼写的过程中会臆造出并不存在的词形（把 *ankommen* 拼成 *anrekommen*）。整条习语本身就是一个词典里查得到的固定搭配，写全它比硬拆一个词更准确、也更不容易拼错。
   - **引用形式按被分析语言自己的词典惯例来定，不要照搬其他语言的惯例。** 拉丁语词典用第一人称单数现在时作动词词头（*confero*、*succedo*），不是不定式；拉丁语名词用主格单数（*phalanx*、*carrus*），不是词干。
   - **词条必须是这门语言里真实存在的完整单词**，不能是截断的词干或拼凑出来的形式（*phalange* 的词条是 *phalanx*，不是 *phalang*）；并且词条必须和你在同一条里给出的变化形式是**同一个词**——括号里写了 *confero, contuli, collatum*，词条就不能写成 *infero*。
-  - 名词：给出该语言的语法性，并且**只写这个词实际的那一个定冠词**。德语的定冠词是 der、die、das 三者之一，必须三选一：Erdbeben 是中性，就只写 das，写成「der/das」或列出多个是错的。（法语、俄语等按该语言的阳性/阴性/中性体例；中文、英文等没有语法性的语言，这一项整条略去。）此外给出复数形式。
+  - 名词：给出该语言的语法性，并且**只写这个词实际的那一个定冠词**。德语的定冠词是 der、die、das 三者之一，必须三选一：Erdbeben 是中性，就只写 das，写成「der/das」或列出多个是错的。（法语、俄语等按该语言的阳性/阴性/中性体例；中文、英文、土耳其语等没有语法性的语言，这一项整条略去——**不要写"无性/不分性/中性（因为这门语言没有语法性）"这类交代句**，那仍然是在写这一项、只是换了个说法，等于没有跳过；实测土耳其语名词被编出「阴性」「中性」这类土耳其语根本没有的语法性类别，也出现过写"neuter/non-gendered（Turkish has no grammatical gender）"这种解释了半天为什么要跳过、结果还是没跳过的写法，两种都不要。）此外给出复数形式。
   - 动词：标出该语言里对识别这个词有帮助的核心变位形式（例如德语给出第三人称单数现在时、过去式 Präteritum、过去分词 Partizip II 三种形式；其他语言按该语言惯例给出对应的原形/变位提示）。
   - 形容词等其他词性：如有值得注意的变格/比较级等形式也可以简要补充，没有就不提。
 - 如果句子里夹杂其他语言的词汇，也一并标注并解释。
